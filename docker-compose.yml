@@ -1,0 +1,15 @@
+services:
+  claude-review-bot:
+    build: .
+    image: claude-review-bot:latest
+    env_file: .env
+    environment:
+      PORT: "8787"
+    ports:
+      # 外部公開はホストのcloudflared経由。ホスト外からは直接届かないようにする
+      - "127.0.0.1:8787:8787"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
