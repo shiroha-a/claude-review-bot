@@ -1,18 +1,28 @@
 import type { PullRequestGateway, PullRef } from "../github/pr.js";
 import type { ClaudeReviewOptions, ClaudeReviewResult } from "./claude.js";
+import type { ToolResult } from "./tools.js";
+import type { Workspace } from "./workspace.js";
 import { parsePatch, type ParsedPatch } from "./diff.js";
 import { filterFiles } from "./filter.js";
 import { buildReviewPayload } from "./format.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompt.js";
+import { executeTool as executeToolIn } from "./tools.js";
 
 export interface ReviewerDeps {
   gateway: PullRequestGateway;
-  requestReview: (options: ClaudeReviewOptions) => Promise<ClaudeReviewResult>;
+  /** Checks out the pull request head so the model can explore it. */
+  openWorkspace: (ref: PullRef, sha: string) => Promise<Workspace>;
+  /** Runs the review agent; `executeTool` is bound to the opened workspace. */
+  runAgent: (
+    options: ClaudeReviewOptions,
+    executeTool: (name: string, input: unknown) => Promise<ToolResult>,
+  ) => Promise<ClaudeReviewResult>;
   botLogin: string;
   config: {
     model: string;
     effort: ClaudeReviewOptions["effort"];
     maxTokens: number;
+    maxTurns: number;
     language: string;
     maxDiffChars: number;
     excludeGlobs: string[];
@@ -62,10 +72,11 @@ export async function reviewPullRequest(
   const patches = new Map<string, ParsedPatch>(
     included.map((f) => [f.filename, parsePatch(f.patch)]),
   );
-  const result = await deps.requestReview({
+  const agentOptions: ClaudeReviewOptions = {
     model: config.model,
     effort: config.effort,
     maxTokens: config.maxTokens,
+    maxTurns: config.maxTurns,
     system: buildSystemPrompt(config.language),
     user: buildUserPrompt({
       repo: `${ref.owner}/${ref.repo}`,
@@ -76,8 +87,20 @@ export async function reviewPullRequest(
         status: f.status,
         parsed: patches.get(f.filename)!,
       })),
+      skippedFiles: skipped.filter((s) => s.reason !== "removed").map((s) => s.filename),
     }),
-  });
+  };
+
+  const workspace = await deps.openWorkspace(ref, pull.headSha);
+  let result: ClaudeReviewResult;
+  try {
+    result = await deps.runAgent(agentOptions, (name, input) =>
+      executeToolIn(workspace.root, name, input),
+    );
+  } finally {
+    // 一時ディレクトリはレビューの成否に関わらず必ず消す
+    await workspace.dispose();
+  }
 
   if (result.kind === "refused") {
     await gateway.createReview(ref, pull.headSha, {
@@ -87,7 +110,10 @@ export async function reviewPullRequest(
     return "refused";
   }
 
-  const payload = buildReviewPayload(result.output, patches, skipped, result.model);
+  const payload = buildReviewPayload(result.output, patches, skipped, {
+    model: result.model,
+    stats: result.stats,
+  });
   await gateway.createReview(ref, pull.headSha, payload);
   return "posted";
 }
