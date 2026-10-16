@@ -3,12 +3,16 @@ import type { PullInfo, PullRequestGateway } from "../src/github/pr.js";
 import type { ClaudeReviewOptions, ClaudeReviewResult } from "../src/review/claude.js";
 import type { PullFile } from "../src/review/filter.js";
 import { reviewPullRequest, type ReviewerDeps } from "../src/review/reviewer.js";
+import type { ToolResult } from "../src/review/tools.js";
 
 const REF = { owner: "o", repo: "r", pullNumber: 1 };
 const BOT = "claude-review[bot]";
 const AUTO = { skipDraft: true, skipIfReviewed: true };
 const AUTHOR = { skipDraft: false, skipIfReviewed: true };
 const FORCE = { skipDraft: false, skipIfReviewed: false };
+const WORKSPACE_ROOT = "/tmp/does-not-exist-review-ws";
+
+type ExecuteTool = (name: string, input: unknown) => Promise<ToolResult>;
 
 function setup(opts: {
   pull?: Partial<PullInfo>;
@@ -32,19 +36,29 @@ function setup(opts: {
     hasReviewForCommit: vi.fn(async () => opts.alreadyReviewed ?? false),
     createReview: vi.fn(async () => {}),
   };
+  const dispose = vi.fn(async () => {});
+  const openWorkspace = vi.fn(async () => ({ root: WORKSPACE_ROOT, dispose }));
+  // 既存テストとの互換のため、エージェント実行のモックをrequestReviewと呼ぶ
   const requestReview = vi.fn(
-    async (_options: ClaudeReviewOptions): Promise<ClaudeReviewResult> =>
+    async (_options: ClaudeReviewOptions, _execute: ExecuteTool): Promise<ClaudeReviewResult> =>
       opts.result ?? {
         kind: "ok" as const,
         model: "m",
+        stats: { turns: 1, toolCalls: 2 },
         output: {
+          overview: "o",
+          verdict: "needs_changes",
+          verdict_reason: "r",
           summary: "s",
+          testing: "",
+          design: "",
           comments: [
             {
               path: "a.ts",
               line: 1,
               side: "RIGHT" as const,
               severity: "major" as const,
+              category: "bug" as const,
               body: "x",
             },
           ],
@@ -53,18 +67,20 @@ function setup(opts: {
   );
   const deps: ReviewerDeps = {
     gateway,
-    requestReview,
+    openWorkspace,
+    runAgent: requestReview,
     botLogin: BOT,
     config: {
       model: "m",
       effort: "medium",
       maxTokens: 1000,
+      maxTurns: 5,
       language: "Japanese",
       maxDiffChars: 10_000,
       excludeGlobs: [],
     },
   };
-  return { deps, gateway, requestReview };
+  return { deps, gateway, requestReview, openWorkspace, dispose };
 }
 
 describe("reviewPullRequest", () => {
@@ -79,7 +95,7 @@ describe("reviewPullRequest", () => {
       REF,
       "sha1",
       expect.objectContaining({
-        comments: [{ path: "a.ts", line: 1, side: "RIGHT", body: "**[major]** x" }],
+        comments: [{ path: "a.ts", line: 1, side: "RIGHT", body: "**[major · bug]** x" }],
       }),
     );
   });
@@ -147,5 +163,50 @@ describe("reviewPullRequest", () => {
     requestReview.mockRejectedValueOnce(new Error("boom"));
     await expect(reviewPullRequest(deps, REF, AUTO)).rejects.toThrow("boom");
     expect(gateway.createReview).not.toHaveBeenCalled();
+  });
+
+  it("opens the workspace at the head commit and disposes it after the review", async () => {
+    const { deps, openWorkspace, dispose } = setup({});
+    await reviewPullRequest(deps, REF, AUTO);
+    expect(openWorkspace).toHaveBeenCalledWith(REF, "sha1");
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes the workspace even when the agent fails", async () => {
+    const { deps, requestReview, dispose } = setup({});
+    requestReview.mockRejectedValueOnce(new Error("boom"));
+    await expect(reviewPullRequest(deps, REF, AUTO)).rejects.toThrow("boom");
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not open a workspace when the review is skipped", async () => {
+    const { deps, openWorkspace } = setup({ alreadyReviewed: true });
+    await reviewPullRequest(deps, REF, AUTO);
+    expect(openWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("binds the tool executor to the workspace root", async () => {
+    const { deps, requestReview } = setup({});
+    await reviewPullRequest(deps, REF, AUTO);
+    const execute = requestReview.mock.calls[0]![1];
+    // 存在しないルートで実行するとnot foundになる。ルートが渡っていることの確認
+    const r = await execute("read_file", { path: "a.ts" });
+    expect(r).toEqual({ content: "file not found: a.ts", isError: true });
+  });
+
+  it("tells the model about changed files that are not in the diff, except removed ones", async () => {
+    const { deps, requestReview } = setup({
+      files: [
+        { filename: "a.ts", status: "modified", patch: "@@ -1 +1 @@\n-a\n+b" },
+        { filename: "package-lock.json", status: "modified", patch: "x" },
+        { filename: "gone.ts", status: "removed", patch: "-x" },
+      ],
+    });
+    await reviewPullRequest(deps, REF, AUTO);
+    const { user, maxTurns } = requestReview.mock.calls[0]![0];
+    expect(user).toContain("<not_in_diff>");
+    expect(user).toContain("package-lock.json");
+    expect(user).not.toContain("gone.ts");
+    expect(maxTurns).toBe(5);
   });
 });

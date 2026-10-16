@@ -3,7 +3,9 @@
 Claude APIでPull Requestをレビューし、行単位のコメントとして投稿するGitHub Appです。
 
 - PRに`/review`とコメントするとレビューします(自動レビューは既定でOFF)
-- 指摘は重要度(critical / major / minor / nit)付きのインラインコメント。総評はレビュー本文
+- PRのコードをcloneし、Claudeが呼び出し元・関連テスト・既存の実装を調べてからレビューします
+- 本文には判定(マージ可 / 要修正 / 要議論)、変更の概要、主な指摘、テスト、設計・保守性を書きます
+- 指摘は重要度(critical / major / minor / nit)と種類(bug / security / performance / test / design / style)付きのインラインコメントです
 - レビューは常に`COMMENT`。ApproveやRequest changesはしません
 - lockfileや生成物は除外。サイズ上限で対象外になったファイルは本文に一覧を出します
 
@@ -22,11 +24,14 @@ PR作成者がレビュー済みのコミットで`/review`を実行すると、
 
 ```
 GitHub ──webhook──> server.ts ──> reviewer.ts
-                                     │ 1. PRとファイル一覧を取得
-                                     │ 2. 除外・サイズ上限を適用
-                                     │ 3. diffに行番号を付けてClaudeへ(構造化出力)
-                                     │ 4. diff外の行への指摘は本文へ移す
-                                     └ 5. pulls.createReview(event: COMMENT)
+                                     │ 1. PRとファイル一覧を取得し、除外・サイズ上限を適用
+                                     │ 2. PRのhead commitを一時ディレクトリへshallow clone
+                                     │ 3. 行番号付きdiffをClaudeへ渡し、ツールループを実行
+                                     │      read_file / list_files / grep(読み取り専用)
+                                     │      MAX_AGENT_TURNSに達したらツールなしで最終回答
+                                     │ 4. 構造化出力のレビューを受け取り、diff外の行への指摘は本文へ移す
+                                     │ 5. pulls.createReview(event: COMMENT)
+                                     └ 6. cloneを削除(失敗時も)
 ```
 
 ## セットアップ
@@ -67,7 +72,8 @@ npm start             # node --env-file=.env dist/server.js
 | `GITHUB_WEBHOOK_SECRET`   | 必須                        | Webhookの署名検証用シークレット                                     |
 | `ANTHROPIC_API_KEY`       | -                           | 未設定ならSDKの既定の認証情報解決に従う                             |
 | `CLAUDE_MODEL`            | `claude-opus-5-5`           | 使用モデル                                                          |
-| `CLAUDE_EFFORT`           | `medium`                    | `low` / `medium` / `high` / `xhigh` / `max`                         |
+| `CLAUDE_EFFORT`           | `high`                      | `low` / `medium` / `high` / `xhigh` / `max`                         |
+| `MAX_AGENT_TURNS`         | `25`                        | リポジトリを調べるツール呼び出しのターン数上限                      |
 | `CLAUDE_MAX_TOKENS`       | `32000`                     | 応答の最大トークン数                                                |
 | `REVIEW_LANGUAGE`         | `Japanese`                  | レビューコメントの言語                                              |
 | `MAX_DIFF_CHARS`          | `200000`                    | 1回のレビューでClaudeへ送るpatchの合計文字数                        |
@@ -80,7 +86,8 @@ npm start             # node --env-file=.env dist/server.js
 
 - Webhookは署名(`X-Hub-Signature-256`)を検証します
 - APIクレジットの消費は、PR作成者本人による「1コミット1回」とメンテナの実行に限られます。第三者が他人のPRで`/review`を打っても無視します
-- PRの内容はプロンプトインジェクションの入力になり得ます。モデルにツールは渡しておらず、できるのは`COMMENT`レビューの投稿だけです
+- PRの内容とリポジトリのファイルはプロンプトインジェクションの入力になり得ます。モデルに渡すツールは読み取り専用で、clone先の外(`..`・絶対パス・symlink・`.git`)は読めません。リポジトリのコードは実行しません。最終的にできるのは`COMMENT`レビューの投稿だけです
+- cloneの認証トークンは環境変数経由でgitに渡し、コマンドライン引数や`.git/config`には残しません
 - 安全分類器による拒否は、サーバー側フォールバック(`fallbacks: "default"`)で別モデルが引き継ぎます。それでも拒否された場合は、その旨をレビュー本文に書きます
 
 ## 開発
@@ -94,5 +101,5 @@ npm run format
 ## 制限
 
 - 毎回PR全体のdiffをレビューします(前回からの差分だけを見る機能はありません)
-- 変更ファイル以外のコード(呼び出し元など)は参照しません
+- リポジトリを調べる分、1回のレビューは数十秒〜数分かかり、diffだけの場合よりコストが上がります
 - 指摘への返信には応答しません

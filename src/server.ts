@@ -1,10 +1,12 @@
 import { createServer } from "node:http";
 import Anthropic from "@anthropic-ai/sdk";
-import { App, createNodeMiddleware } from "octokit";
+import { createNodeMiddleware } from "@octokit/webhooks";
+import { App } from "octokit";
 import { loadConfig } from "./config.js";
 import { createGateway, type PullRef } from "./github/pr.js";
 import { KeyedQueue } from "./queue.js";
-import { requestReview } from "./review/claude.js";
+import { createSender, runReviewAgent } from "./review/claude.js";
+import { openWorkspace } from "./review/workspace.js";
 import { reviewPullRequest, type ReviewOptions } from "./review/reviewer.js";
 import { decideCommandTrigger } from "./trigger.js";
 
@@ -24,6 +26,7 @@ if (!appInfo) throw new Error("Failed to resolve GitHub App identity");
 // 二重レビュー判定でbot自身のレビューを識別するためのログイン名
 const botLogin = `${appInfo.slug}[bot]`;
 
+const sender = createSender(anthropic);
 const queue = new KeyedQueue();
 const maintainers = new Set(config.MAINTAINER_ASSOCIATIONS);
 
@@ -42,12 +45,34 @@ function schedule(
       const outcome = await reviewPullRequest(
         {
           gateway: createGateway(octokit),
-          requestReview: (options) => requestReview(anthropic, options),
+          openWorkspace: async ({ owner, repo }, sha) => {
+            const auth = (await octokit.auth({ type: "installation" })) as { token: string };
+            return openWorkspace({
+              remoteUrl: `https://github.com/${owner}/${repo}.git`,
+              sha,
+              token: auth.token,
+            });
+          },
+          runAgent: (options, executeTool) =>
+            runReviewAgent(
+              {
+                send: sender,
+                executeTool: async (name, input) => {
+                  const result = await executeTool(name, input);
+                  console.log(
+                    `[tool] ${key} ${name} ${JSON.stringify(input)}${result.isError ? " (error)" : ""}`,
+                  );
+                  return result;
+                },
+              },
+              options,
+            ),
           botLogin,
           config: {
             model: config.CLAUDE_MODEL,
             effort: config.CLAUDE_EFFORT,
             maxTokens: config.CLAUDE_MAX_TOKENS,
+            maxTurns: config.MAX_AGENT_TURNS,
             language: config.REVIEW_LANGUAGE,
             maxDiffChars: config.MAX_DIFF_CHARS,
             excludeGlobs: config.EXCLUDE_GLOBS,
@@ -126,7 +151,8 @@ app.webhooks.onError((error) => {
   console.error("[webhook] error", error);
 });
 
-const middleware = createNodeMiddleware(app);
+// @octokit/appのミドルウェアはOAuth設定を必須とするため、Webhook専用のものを使う
+const middleware = createNodeMiddleware(app.webhooks);
 const server = createServer(async (req, res) => {
   if (await middleware(req, res)) return;
   if (req.url === "/healthz") {

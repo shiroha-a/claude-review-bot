@@ -19,6 +19,7 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.134.0",
+    "@octokit/webhooks": "^14.2.0",
     "octokit": "^5.0.5",
     "picomatch": "^4.0.7",
     "zod": "^4.6.7"
