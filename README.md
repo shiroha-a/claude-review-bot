@@ -54,14 +54,19 @@ GitHubの Settings > Developer settings > GitHub Apps > New GitHub App で作成
 
 ### 2. 起動
 
+Dockerで常駐させます。
+
 ```bash
-npm install
 cp .env.example .env   # 値を埋める
-npm run build
-npm start             # node --env-file=.env dist/server.js
+docker compose up -d --build
+docker compose logs -f # [tool] / [review] の行で動作を確認できる
 ```
 
-開発時は`npm run dev`(tsx watch)で起動できます。
+- ポートはホストの`127.0.0.1:8787`にだけ公開します。外部からはトンネル(cloudflared等)経由で`/api/github/webhooks`へ届けてください
+- `restart: unless-stopped`なので、Dockerが自動起動する設定ならサーバー再起動後も立ち上がります
+- コードを更新したら`docker compose up -d --build`で入れ替えます
+
+Dockerを使わない場合は`npm install && npm run build && npm start`、開発時は`npm run dev`(tsx watch)で起動できます。
 
 ## 環境変数
 
