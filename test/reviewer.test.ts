@@ -6,6 +6,9 @@ import { reviewPullRequest, type ReviewerDeps } from "../src/review/reviewer.js"
 
 const REF = { owner: "o", repo: "r", pullNumber: 1 };
 const BOT = "claude-review[bot]";
+const AUTO = { skipDraft: true, skipIfReviewed: true };
+const AUTHOR = { skipDraft: false, skipIfReviewed: true };
+const FORCE = { skipDraft: false, skipIfReviewed: false };
 
 function setup(opts: {
   pull?: Partial<PullInfo>;
@@ -67,7 +70,7 @@ function setup(opts: {
 describe("reviewPullRequest", () => {
   it("posts an inline review for the head commit", async () => {
     const { deps, gateway, requestReview } = setup({});
-    await expect(reviewPullRequest(deps, REF, { force: false })).resolves.toBe("posted");
+    await expect(reviewPullRequest(deps, REF, AUTO)).resolves.toBe("posted");
 
     expect(gateway.hasReviewForCommit).toHaveBeenCalledWith(REF, "sha1", BOT);
     const prompt = requestReview.mock.calls[0]![0];
@@ -83,27 +86,40 @@ describe("reviewPullRequest", () => {
 
   it("skips a commit the bot has already reviewed", async () => {
     const { deps, gateway, requestReview } = setup({ alreadyReviewed: true });
-    await expect(reviewPullRequest(deps, REF, { force: false })).resolves.toBe(
-      "skipped-already-reviewed",
-    );
+    await expect(reviewPullRequest(deps, REF, AUTO)).resolves.toBe("skipped-already-reviewed");
     expect(requestReview).not.toHaveBeenCalled();
     expect(gateway.createReview).not.toHaveBeenCalled();
   });
 
   it("skips drafts unless forced", async () => {
     const draft = setup({ pull: { draft: true } });
-    await expect(reviewPullRequest(draft.deps, REF, { force: false })).resolves.toBe(
-      "skipped-draft",
-    );
+    await expect(reviewPullRequest(draft.deps, REF, AUTO)).resolves.toBe("skipped-draft");
     expect(draft.requestReview).not.toHaveBeenCalled();
 
     const forced = setup({ pull: { draft: true }, alreadyReviewed: true });
-    await expect(reviewPullRequest(forced.deps, REF, { force: true })).resolves.toBe("posted");
+    await expect(reviewPullRequest(forced.deps, REF, FORCE)).resolves.toBe("posted");
+  });
+
+  it("lets the author review a draft once per commit", async () => {
+    const fresh = setup({ pull: { draft: true } });
+    await expect(reviewPullRequest(fresh.deps, REF, AUTHOR)).resolves.toBe("posted");
+
+    const reviewed = setup({ pull: { draft: true }, alreadyReviewed: true });
+    await expect(reviewPullRequest(reviewed.deps, REF, AUTHOR)).resolves.toBe(
+      "skipped-already-reviewed",
+    );
+    expect(reviewed.requestReview).not.toHaveBeenCalled();
+  });
+
+  it("does not look up existing reviews when re-review is forced", async () => {
+    const { deps, gateway } = setup({});
+    await reviewPullRequest(deps, REF, FORCE);
+    expect(gateway.hasReviewForCommit).not.toHaveBeenCalled();
   });
 
   it("does not review closed pull requests even when forced", async () => {
     const { deps, requestReview } = setup({ pull: { state: "closed" } });
-    await expect(reviewPullRequest(deps, REF, { force: true })).resolves.toBe("skipped-closed");
+    await expect(reviewPullRequest(deps, REF, FORCE)).resolves.toBe("skipped-closed");
     expect(requestReview).not.toHaveBeenCalled();
   });
 
@@ -111,14 +127,14 @@ describe("reviewPullRequest", () => {
     const { deps, requestReview, gateway } = setup({
       files: [{ filename: "package-lock.json", status: "modified", patch: "x" }],
     });
-    await expect(reviewPullRequest(deps, REF, { force: false })).resolves.toBe("skipped-no-files");
+    await expect(reviewPullRequest(deps, REF, AUTO)).resolves.toBe("skipped-no-files");
     expect(requestReview).not.toHaveBeenCalled();
     expect(gateway.createReview).not.toHaveBeenCalled();
   });
 
   it("posts a notice when the model refuses", async () => {
     const { deps, gateway } = setup({ result: { kind: "refused", category: "cyber" } });
-    await expect(reviewPullRequest(deps, REF, { force: false })).resolves.toBe("refused");
+    await expect(reviewPullRequest(deps, REF, AUTO)).resolves.toBe("refused");
     expect(gateway.createReview).toHaveBeenCalledWith(
       REF,
       "sha1",
@@ -129,7 +145,7 @@ describe("reviewPullRequest", () => {
   it("does not post anything when the Claude call fails", async () => {
     const { deps, gateway, requestReview } = setup({});
     requestReview.mockRejectedValueOnce(new Error("boom"));
-    await expect(reviewPullRequest(deps, REF, { force: false })).rejects.toThrow("boom");
+    await expect(reviewPullRequest(deps, REF, AUTO)).rejects.toThrow("boom");
     expect(gateway.createReview).not.toHaveBeenCalled();
   });
 });

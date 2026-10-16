@@ -7,7 +7,7 @@ const csv = (value: string) =>
     .filter((s) => s.length > 0);
 
 const ConfigSchema = z.object({
-  PORT: z.coerce.number().int().positive().default(3000),
+  PORT: z.coerce.number().int().positive().default(8787),
   GITHUB_APP_ID: z.string().min(1),
   // .envでは改行を\nと書くことが多いため、実改行へ戻す
   GITHUB_PRIVATE_KEY: z
@@ -22,7 +22,12 @@ const ConfigSchema = z.object({
   REVIEW_LANGUAGE: z.string().default("Japanese"),
   MAX_DIFF_CHARS: z.coerce.number().int().positive().default(200_000),
   EXCLUDE_GLOBS: z.string().default("").transform(csv),
-  ALLOWED_AUTHOR_ASSOCIATIONS: z.string().default("OWNER,MEMBER,COLLABORATOR").transform(csv),
+  MAINTAINER_ASSOCIATIONS: z.string().default("OWNER,MEMBER,COLLABORATOR").transform(csv),
+  // z.coerce.booleanは"false"もtrueにするため、文字列で受けて判定する
+  AUTO_REVIEW: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   REVIEW_COMMAND: z.string().default("/review"),
 });
 

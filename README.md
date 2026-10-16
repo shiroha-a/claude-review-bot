@@ -2,11 +2,21 @@
 
 Claude APIでPull Requestをレビューし、行単位のコメントとして投稿するGitHub Appです。
 
-- PRのオープン・push・draft解除で自動レビュー。PRに`/review`とコメントすれば手動で再レビュー
+- PRに`/review`とコメントするとレビューします(自動レビューは既定でOFF)
 - 指摘は重要度(critical / major / minor / nit)付きのインラインコメント。総評はレビュー本文
 - レビューは常に`COMMENT`。ApproveやRequest changesはしません
-- 同じコミットは二度レビューしません(`/review`は除く)
 - lockfileや生成物は除外。サイズ上限で対象外になったファイルは本文に一覧を出します
+
+## `/review`を使える人
+
+| 人                                  | 対象         | 同じコミットの再レビュー   | draft |
+| ----------------------------------- | ------------ | -------------------------- | ----- |
+| メンテナ(`MAINTAINER_ASSOCIATIONS`) | 任意のPR     | できる                     | 対象  |
+| PR作成者本人                        | 自分のPRのみ | できない(pushすると再度可) | 対象  |
+| それ以外                            | -            | -                          | -     |
+
+PR作成者がレビュー済みのコミットで`/review`を実行すると、botがその旨を返信します。
+`AUTO_REVIEW=true`にすると、メンテナが作成したPRはオープン・push・draft解除のたびに自動でレビューされます。
 
 ## 仕組み
 
@@ -50,25 +60,26 @@ npm start             # node --env-file=.env dist/server.js
 
 ## 環境変数
 
-| 変数                          | 既定値                      | 説明                                                    |
-| ----------------------------- | --------------------------- | ------------------------------------------------------- |
-| `GITHUB_APP_ID`               | 必須                        | GitHub AppのID                                          |
-| `GITHUB_PRIVATE_KEY`          | 必須                        | PEM形式の秘密鍵。改行は`\n`で1行に書いてもよい          |
-| `GITHUB_WEBHOOK_SECRET`       | 必須                        | Webhookの署名検証用シークレット                         |
-| `ANTHROPIC_API_KEY`           | -                           | 未設定ならSDKの既定の認証情報解決に従う                 |
-| `CLAUDE_MODEL`                | `claude-opus-5-5`           | 使用モデル                                              |
-| `CLAUDE_EFFORT`               | `medium`                    | `low` / `medium` / `high` / `xhigh` / `max`             |
-| `CLAUDE_MAX_TOKENS`           | `32000`                     | 応答の最大トークン数                                    |
-| `REVIEW_LANGUAGE`             | `Japanese`                  | レビューコメントの言語                                  |
-| `MAX_DIFF_CHARS`              | `200000`                    | 1回のレビューでClaudeへ送るpatchの合計文字数            |
-| `EXCLUDE_GLOBS`               | なし                        | 追加で除外するglob(カンマ区切り)                        |
-| `ALLOWED_AUTHOR_ASSOCIATIONS` | `OWNER,MEMBER,COLLABORATOR` | レビュー対象とするPR作成者(`/review`はコメント者)の関係 |
-| `REVIEW_COMMAND`              | `/review`                   | 手動レビューのコマンド                                  |
+| 変数                      | 既定値                      | 説明                                                                |
+| ------------------------- | --------------------------- | ------------------------------------------------------------------- |
+| `GITHUB_APP_ID`           | 必須                        | GitHub AppのID                                                      |
+| `GITHUB_PRIVATE_KEY`      | 必須                        | PEM形式の秘密鍵。改行は`\n`で1行に書いてもよい                      |
+| `GITHUB_WEBHOOK_SECRET`   | 必須                        | Webhookの署名検証用シークレット                                     |
+| `ANTHROPIC_API_KEY`       | -                           | 未設定ならSDKの既定の認証情報解決に従う                             |
+| `CLAUDE_MODEL`            | `claude-opus-5-5`           | 使用モデル                                                          |
+| `CLAUDE_EFFORT`           | `medium`                    | `low` / `medium` / `high` / `xhigh` / `max`                         |
+| `CLAUDE_MAX_TOKENS`       | `32000`                     | 応答の最大トークン数                                                |
+| `REVIEW_LANGUAGE`         | `Japanese`                  | レビューコメントの言語                                              |
+| `MAX_DIFF_CHARS`          | `200000`                    | 1回のレビューでClaudeへ送るpatchの合計文字数                        |
+| `EXCLUDE_GLOBS`           | なし                        | 追加で除外するglob(カンマ区切り)                                    |
+| `MAINTAINER_ASSOCIATIONS` | `OWNER,MEMBER,COLLABORATOR` | メンテナとして扱う関係。任意のPRで`/review`と強制再レビューができる |
+| `AUTO_REVIEW`             | `false`                     | `true`でメンテナのPRをイベント時に自動レビュー                      |
+| `REVIEW_COMMAND`          | `/review`                   | レビューのコマンド                                                  |
 
 ## 安全性
 
 - Webhookは署名(`X-Hub-Signature-256`)を検証します
-- 公開リポジトリでも、第三者のPRで勝手にAPIクレジットを消費されないよう、`ALLOWED_AUTHOR_ASSOCIATIONS`でレビュー対象を絞っています
+- APIクレジットの消費は、PR作成者本人による「1コミット1回」とメンテナの実行に限られます。第三者が他人のPRで`/review`を打っても無視します
 - PRの内容はプロンプトインジェクションの入力になり得ます。モデルにツールは渡しておらず、できるのは`COMMENT`レビューの投稿だけです
 - 安全分類器による拒否は、サーバー側フォールバック(`fallbacks: "default"`)で別モデルが引き継ぎます。それでも拒否された場合は、その旨をレビュー本文に書きます
 

@@ -27,24 +27,29 @@ export type ReviewOutcome =
   | "skipped-no-files"
   | "refused";
 
-/**
- * Reviews one pull request end to end and posts the result as a COMMENT review.
- * `force` bypasses the draft and already-reviewed checks (used by the manual command).
- */
+export interface ReviewOptions {
+  /** Skip draft pull requests. */
+  skipDraft: boolean;
+  /** Skip when the bot has already reviewed the current head commit. */
+  skipIfReviewed: boolean;
+}
+
+/** Reviews one pull request end to end and posts the result as a COMMENT review. */
 export async function reviewPullRequest(
   deps: ReviewerDeps,
   ref: PullRef,
-  options: { force: boolean },
+  options: ReviewOptions,
 ): Promise<ReviewOutcome> {
   const { gateway, config } = deps;
   const pull = await gateway.getPull(ref);
 
   if (pull.state !== "open") return "skipped-closed";
-  if (!options.force) {
-    if (pull.draft) return "skipped-draft";
-    if (await gateway.hasReviewForCommit(ref, pull.headSha, deps.botLogin)) {
-      return "skipped-already-reviewed";
-    }
+  if (options.skipDraft && pull.draft) return "skipped-draft";
+  if (
+    options.skipIfReviewed &&
+    (await gateway.hasReviewForCommit(ref, pull.headSha, deps.botLogin))
+  ) {
+    return "skipped-already-reviewed";
   }
 
   const files = await gateway.listFiles(ref);
