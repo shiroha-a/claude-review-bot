@@ -5,7 +5,8 @@ import { loadConfig } from "./config.js";
 import { createGateway, type PullRef } from "./github/pr.js";
 import { KeyedQueue } from "./queue.js";
 import { requestReview } from "./review/claude.js";
-import { reviewPullRequest } from "./review/reviewer.js";
+import { reviewPullRequest, type ReviewOptions } from "./review/reviewer.js";
+import { decideCommandTrigger } from "./trigger.js";
 
 const config = loadConfig();
 
@@ -24,9 +25,16 @@ if (!appInfo) throw new Error("Failed to resolve GitHub App identity");
 const botLogin = `${appInfo.slug}[bot]`;
 
 const queue = new KeyedQueue();
-const allowed = new Set(config.ALLOWED_AUTHOR_ASSOCIATIONS);
+const maintainers = new Set(config.MAINTAINER_ASSOCIATIONS);
 
-function schedule(octokit: Parameters<typeof createGateway>[0], ref: PullRef, force: boolean) {
+type InstallationOctokit = Parameters<typeof createGateway>[0];
+
+function schedule(
+  octokit: InstallationOctokit,
+  ref: PullRef,
+  options: ReviewOptions,
+  onSkippedAlreadyReviewed?: () => Promise<void>,
+) {
   const key = `${ref.owner}/${ref.repo}#${ref.pullNumber}`;
   // Webhookの応答を待たせないため、レビューは投げっぱなしで実行する
   void queue
@@ -46,55 +54,72 @@ function schedule(octokit: Parameters<typeof createGateway>[0], ref: PullRef, fo
           },
         },
         ref,
-        { force },
+        options,
       );
       console.log(`[review] ${key} ${outcome}`);
+      if (outcome === "skipped-already-reviewed") await onSkippedAlreadyReviewed?.();
     })
     .catch((error: unknown) => {
       console.error(`[review] ${key} failed`, error);
     });
 }
 
-app.webhooks.on(
-  [
-    "pull_request.opened",
-    "pull_request.reopened",
-    "pull_request.ready_for_review",
-    "pull_request.synchronize",
-  ],
-  ({ octokit, payload }) => {
-    const pr = payload.pull_request;
-    if (!allowed.has(pr.author_association)) {
-      console.log(`[review] skip #${pr.number}: author_association=${pr.author_association}`);
-      return;
-    }
-    schedule(
-      octokit,
-      {
-        owner: payload.repository.owner.login,
-        repo: payload.repository.name,
-        pullNumber: pr.number,
-      },
-      false,
-    );
-  },
-);
+if (config.AUTO_REVIEW) {
+  app.webhooks.on(
+    [
+      "pull_request.opened",
+      "pull_request.reopened",
+      "pull_request.ready_for_review",
+      "pull_request.synchronize",
+    ],
+    ({ octokit, payload }) => {
+      const pr = payload.pull_request;
+      // 自動レビューはメンテナのPRに限る。外部のPRはコマンドで明示的に依頼してもらう
+      if (!maintainers.has(pr.author_association)) {
+        console.log(`[review] skip #${pr.number}: author_association=${pr.author_association}`);
+        return;
+      }
+      schedule(
+        octokit,
+        {
+          owner: payload.repository.owner.login,
+          repo: payload.repository.name,
+          pullNumber: pr.number,
+        },
+        { skipDraft: true, skipIfReviewed: true },
+      );
+    },
+  );
+}
 
 app.webhooks.on("issue_comment.created", ({ octokit, payload }) => {
   const { issue, comment } = payload;
   if (!issue.pull_request) return;
-  if (comment.user?.type === "Bot") return;
-  if (comment.body.trim() !== config.REVIEW_COMMAND) return;
-  if (!allowed.has(comment.author_association)) return;
-  schedule(
-    octokit,
+  const decision = decideCommandTrigger(
     {
-      owner: payload.repository.owner.login,
-      repo: payload.repository.name,
-      pullNumber: issue.number,
+      commentBody: comment.body,
+      commenterLogin: comment.user?.login ?? "",
+      commenterAssociation: comment.author_association,
+      commenterIsBot: comment.user?.type === "Bot",
+      prAuthorLogin: issue.user?.login ?? "",
     },
-    true,
+    { command: config.REVIEW_COMMAND, maintainerAssociations: [...maintainers] },
   );
+  if (!decision.run) return;
+
+  const ref = {
+    owner: payload.repository.owner.login,
+    repo: payload.repository.name,
+    pullNumber: issue.number,
+  };
+  schedule(octokit, ref, decision.options, async () => {
+    await octokit.rest.issues.createComment({
+      owner: ref.owner,
+      repo: ref.repo,
+      issue_number: ref.pullNumber,
+      body: `@${comment.user?.login} このコミットはレビュー済みです。変更をpushしてから、もう一度\`${config.REVIEW_COMMAND}\`を実行してください。`,
+    });
+  });
 });
 
 app.webhooks.onError((error) => {
@@ -113,5 +138,8 @@ const server = createServer(async (req, res) => {
 
 server.listen(config.PORT, () => {
   console.log(`claude-review-bot (${botLogin}) listening on :${config.PORT}`);
+  console.log(
+    `auto review: ${config.AUTO_REVIEW ? "on" : "off"}, command: ${config.REVIEW_COMMAND}`,
+  );
   console.log(`webhook endpoint: POST /api/github/webhooks`);
 });
