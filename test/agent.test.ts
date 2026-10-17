@@ -25,6 +25,7 @@ const OUTPUT: ReviewOutput = {
   testing: "",
   design: "",
   comments: [],
+  previous_findings: [],
 };
 
 type Msg = Awaited<ReturnType<AgentDeps["send"]>>;

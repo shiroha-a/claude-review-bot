@@ -1,4 +1,5 @@
 import { renderNumberedPatch, type ParsedPatch } from "./diff.js";
+import type { PreviousFinding } from "./followup.js";
 
 export interface PromptFile {
   filename: string;
@@ -13,6 +14,17 @@ export interface PromptInput {
   files: PromptFile[];
   /** Changed files left out of the diff; the model can still read them with tools. */
   skippedFiles: string[];
+  /** Present when the bot has reviewed an earlier commit and left findings to re-check. */
+  previous?: PreviousContext;
+}
+
+export interface PreviousContext {
+  commit: string;
+  findings: PreviousFinding[];
+  /** Diff from the previously reviewed commit to the head; null when it is not a fast-forward. */
+  changes: PromptFile[] | null;
+  /** Files changed since the previous review that are left out of `changes`. */
+  skippedChanges: string[];
 }
 
 /**
@@ -62,6 +74,26 @@ The final answer has these parts:
   Empty string when there is nothing to say.
 - design: design and maintainability suggestions. Empty string when there is nothing to say.
 - comments: one entry per concrete finding, attached to a line of the diff.
+- previous_findings: the status of each finding from your previous review (see below).
+  Empty array when there is no previous review.
+
+## Follow-up reviews
+
+When the message contains <previous_review>, you reviewed an earlier commit of this pull
+request and the author has pushed changes since. For every finding in it, return one
+previous_findings entry with its id and a status:
+- resolved: the current code fixes the problem.
+- partially_resolved: the problem is reduced but part of it remains.
+- unresolved: the problem is still there.
+note explains the status in one or two sentences and names the code you checked.
+The ids are internal and the author never sees them; in every text field, refer to a previous
+finding by what it is about (for example "the deleteUser return value"), never by its id.
+Decide by reading the current code with the tools, not by trusting commit messages, the
+description, or the shape of the change. <changes_since_previous_review> shows what changed,
+but its line numbers are not valid for comments.
+Do not repeat a finding that is still open in comments; previous_findings already covers it.
+Report new problems, including ones introduced by the fixes, as usual. An unresolved finding
+that must be fixed keeps the verdict at "needs_changes".
 
 ## Line comments
 
@@ -91,14 +123,39 @@ Write every text field in ${language}, using GitHub Markdown. Keep each comment 
 one issue, explain why it matters, and when you can, suggest a concrete fix.`;
 }
 
+function renderFile(f: PromptFile): string {
+  return `<file path="${f.filename}" status="${f.status}">\n${renderNumberedPatch(f.parsed)}\n</file>`;
+}
+
+function renderPrevious(previous: PreviousContext): string {
+  const findings = previous.findings
+    .map((f) => {
+      const location = f.line === null ? f.path : `${f.path}:${f.line}`;
+      return `<finding id="${f.id}" location="${location}">\n${f.body}\n</finding>`;
+    })
+    .join("\n");
+
+  let changes: string;
+  if (previous.changes === null) {
+    changes = `<changes_since_previous_review unavailable="true">
+The previously reviewed commit is not an ancestor of the current head (the branch was
+probably rebased or force-pushed). Check each finding against the current code.
+</changes_since_previous_review>`;
+  } else {
+    const files = previous.changes.map(renderFile).join("\n\n");
+    const skipped =
+      previous.skippedChanges.length > 0
+        ? `\nAlso changed, not shown (excluded or too large):\n${previous.skippedChanges.join("\n")}`
+        : "";
+    changes = `<changes_since_previous_review>\n${files || "(no changes)"}${skipped}\n</changes_since_previous_review>`;
+  }
+
+  return `\n<previous_review commit="${previous.commit}">\n${findings}\n</previous_review>\n\n${changes}\n`;
+}
+
 /** Builds the user message containing the pull request metadata and numbered diffs. */
 export function buildUserPrompt(input: PromptInput): string {
-  const files = input.files
-    .map(
-      (f) =>
-        `<file path="${f.filename}" status="${f.status}">\n${renderNumberedPatch(f.parsed)}\n</file>`,
-    )
-    .join("\n\n");
+  const files = input.files.map(renderFile).join("\n\n");
 
   const skipped =
     input.skippedFiles.length > 0
@@ -115,6 +172,6 @@ ${input.body || "(no description)"}
 <diff>
 ${files}
 </diff>
-${skipped}
+${skipped}${input.previous ? renderPrevious(input.previous) : ""}
 Review this pull request. Investigate the repository with the tools first, then give the final review.`;
 }
