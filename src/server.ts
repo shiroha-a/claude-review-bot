@@ -46,7 +46,12 @@ function schedule(
         {
           gateway: createGateway(octokit),
           openWorkspace: async ({ owner, repo }, sha) => {
-            const auth = (await octokit.auth({ type: "installation" })) as { token: string };
+            // AppはスレッドのresolveのためにContents: writeを持つ。cloneにはそのリポジトリの読み取りだけを渡す
+            const auth = (await octokit.auth({
+              type: "installation",
+              repositoryNames: [repo],
+              permissions: { contents: "read" },
+            })) as { token: string };
             return openWorkspace({
               remoteUrl: `https://github.com/${owner}/${repo}.git`,
               sha,
@@ -68,6 +73,10 @@ function schedule(
               options,
             ),
           botLogin,
+          warn: (message, error) =>
+            console.warn(
+              `[review] ${key} ${message}: ${error instanceof Error ? error.message : String(error)}`,
+            ),
           config: {
             model: config.CLAUDE_MODEL,
             effort: config.CLAUDE_EFFORT,

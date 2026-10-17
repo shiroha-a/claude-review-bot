@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { ReviewOutputSchema, type ReviewOutput } from "../src/review/claude.js";
 import { parsePatch } from "../src/review/diff.js";
+import { parseMarker, type FindingStatus, type PreviousFinding } from "../src/review/followup.js";
 import { buildReviewPayload } from "../src/review/format.js";
 
 const patches = new Map([["src/a.ts", parsePatch("@@ -1,2 +1,2 @@\n a\n-b\n+c")]]);
@@ -16,6 +17,7 @@ function output(overrides: Partial<ReviewOutput> = {}): ReviewOutput {
     testing: "",
     design: "",
     comments: [],
+    previous_findings: [],
     ...overrides,
   };
 }
@@ -139,6 +141,86 @@ describe("buildReviewPayload", () => {
   });
 });
 
+function finding(overrides: Partial<PreviousFinding> = {}): PreviousFinding {
+  return {
+    id: "F1",
+    path: "src/a.ts",
+    line: 2,
+    body: "**[major · bug]** 境界値で落ちる\n詳細",
+    commentId: 11,
+    url: "https://example.test/c/11",
+    ...overrides,
+  };
+}
+
+describe("buildReviewPayload follow-up", () => {
+  const statuses: FindingStatus[] = [
+    { finding: finding(), status: "resolved", note: "条件を修正済み" },
+    {
+      finding: finding({ id: "F2", commentId: null, url: null, line: null, body: "古い指摘" }),
+      status: "unresolved",
+      note: "まだ残っている",
+    },
+    { finding: finding({ id: "F3", commentId: 13, body: "未回答" }), status: "unknown", note: "" },
+  ];
+
+  it("reports the status of each previous finding right after the verdict", () => {
+    const payload = buildReviewPayload(output(), patches, [], META, {
+      commit: "abcdef1234567",
+      statuses,
+    });
+    const body = payload.body;
+    expect(body).toContain("### 前回の指摘の対応状況(`abcdef1`からの変更)");
+    expect(body).toContain(
+      "- **修正済み** [`src/a.ts:2`](https://example.test/c/11) 境界値で落ちる — 条件を修正済み",
+    );
+    expect(body).toContain("- **未修正** `src/a.ts` 古い指摘 — まだ残っている");
+    expect(body).toContain("- **未確認** [`src/a.ts:2`](https://example.test/c/11) 未回答\n");
+    expect(body.indexOf("前回の指摘")).toBeLessThan(body.indexOf("### 変更の概要"));
+  });
+
+  it("keeps unresolved previous findings and new out-of-diff findings in the marker", () => {
+    const payload = buildReviewPayload(
+      output({
+        comments: [
+          {
+            path: "src/a.ts",
+            line: 99,
+            side: "RIGHT",
+            severity: "minor",
+            category: "design",
+            body: "外",
+          },
+        ],
+      }),
+      patches,
+      [],
+      META,
+      { commit: "abcdef1", statuses },
+    );
+    expect(parseMarker(payload.body)).toEqual([
+      { path: "src/a.ts", line: null, body: "古い指摘", commentId: null, url: null },
+      {
+        path: "src/a.ts",
+        line: 2,
+        body: "未回答",
+        commentId: 13,
+        url: "https://example.test/c/11",
+      },
+      { path: "src/a.ts", line: 99, body: "**[minor · design]** 外", commentId: null, url: null },
+    ]);
+  });
+
+  it("omits the section and the marker when nothing is open", () => {
+    const payload = buildReviewPayload(output(), patches, [], META, {
+      commit: "abcdef1",
+      statuses: [],
+    });
+    expect(payload.body).not.toContain("前回の指摘");
+    expect(payload.body).not.toContain("claude-review:open-findings");
+  });
+});
+
 describe("ReviewOutputSchema", () => {
   const valid = {
     overview: "o",
@@ -150,6 +232,7 @@ describe("ReviewOutputSchema", () => {
     comments: [
       { path: "a", line: 1, side: "RIGHT", severity: "nit", category: "style", body: "b" },
     ],
+    previous_findings: [{ id: "F1", status: "resolved", note: "n" }],
   };
 
   it("converts to a JSON schema output format that parses valid output", () => {
@@ -164,6 +247,14 @@ describe("ReviewOutputSchema", () => {
     expect(() =>
       format.parse(
         JSON.stringify({ ...valid, comments: [{ ...valid.comments[0], category: "other" }] }),
+      ),
+    ).toThrow();
+    expect(() =>
+      format.parse(
+        JSON.stringify({
+          ...valid,
+          previous_findings: [{ id: "F1", status: "fixed", note: "n" }],
+        }),
       ),
     ).toThrow();
   });

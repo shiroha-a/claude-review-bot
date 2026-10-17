@@ -20,6 +20,13 @@ export const ReviewOutputSchema = z.object({
       body: z.string(),
     }),
   ),
+  previous_findings: z.array(
+    z.object({
+      id: z.string(),
+      status: z.enum(["resolved", "partially_resolved", "unresolved"]),
+      note: z.string(),
+    }),
+  ),
 });
 
 export type ReviewOutput = z.infer<typeof ReviewOutputSchema>;
