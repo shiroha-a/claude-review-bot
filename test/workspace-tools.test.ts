@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { executeTool, LIMITS } from "../src/review/tools.js";
+import { executeTool, LIMITS, REVIEW_GUIDES } from "../src/review/tools.js";
 import { openWorkspace, type Workspace } from "../src/review/workspace.js";
 
 let source: string;
@@ -180,6 +180,26 @@ describe("grep", () => {
     const r = await executeTool(ws.root, "grep", { pattern: "^line", glob: "big.txt" });
     expect(r.content.split("\n")).toHaveLength(LIMITS.grepMatches + 1);
     expect(r.content).toContain("more matches not shown");
+  });
+});
+
+describe("read_review_guide", () => {
+  it.each(REVIEW_GUIDES)("returns the %s checklist", async (topic) => {
+    const r = await executeTool(ws.root, "read_review_guide", { topic });
+    expect(r.isError).toBe(false);
+    expect(r.content.startsWith("# ")).toBe(true);
+  });
+
+  it("returns the requested checklist, not another one", async () => {
+    const r = await executeTool(ws.root, "read_review_guide", { topic: "security-checklist" });
+    expect(r.content.split("\n")[0]).toContain("セキュリティチェックリスト");
+  });
+
+  it("rejects topics outside the list, including paths", async () => {
+    for (const topic of ["../README", "README", ""]) {
+      const r = await executeTool(ws.root, "read_review_guide", { topic });
+      expect(r.isError).toBe(true);
+    }
   });
 });
 
