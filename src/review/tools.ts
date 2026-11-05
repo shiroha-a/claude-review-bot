@@ -2,6 +2,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { execFile } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import picomatch from "picomatch";
 import { z } from "zod";
@@ -16,6 +17,12 @@ export const LIMITS = {
   grepLineChars: 300,
   grepTimeoutMs: 10_000,
 };
+
+/** Review checklists the model can read with read_review_guide; files live in `guides/`. */
+export const REVIEW_GUIDES = ["bug-patterns", "security-checklist", "language-notes"] as const;
+
+// src/review/とdist/review/のどちらから読み込まれても、リポジトリ直下のguides/を指す
+const GUIDES_DIR = fileURLToPath(new URL("../../guides/", import.meta.url));
 
 export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
   {
@@ -64,6 +71,19 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
     },
     eager_input_streaming: true,
   },
+  {
+    name: "read_review_guide",
+    description:
+      "Read one of the bot's review checklists (not a repository file). " +
+      "bug-patterns covers lenses A and C-F, security-checklist covers lens B, " +
+      "language-notes lists language-specific pitfalls (read only the sections for the languages in the diff).",
+    input_schema: {
+      type: "object",
+      properties: { topic: { type: "string", enum: [...REVIEW_GUIDES] } },
+      required: ["topic"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const ReadFileInput = z.object({
@@ -73,6 +93,7 @@ const ReadFileInput = z.object({
 });
 const ListFilesInput = z.object({ glob: z.string().min(1).optional() });
 const GrepInput = z.object({ pattern: z.string().min(1), glob: z.string().min(1).optional() });
+const ReviewGuideInput = z.object({ topic: z.enum(REVIEW_GUIDES) });
 
 export interface ToolResult {
   content: string;
@@ -178,6 +199,12 @@ async function grepTool(root: string, input: z.infer<typeof GrepInput>) {
   return { content: shown.join("\n") + note, isError: false };
 }
 
+async function reviewGuideTool(input: z.infer<typeof ReviewGuideInput>): Promise<ToolResult> {
+  // topicはenumで検証済みなので、モデルの入力がパスとして解釈されることはない
+  const content = await readFile(`${GUIDES_DIR}${input.topic}.md`, "utf8");
+  return { content, isError: false };
+}
+
 /** Validates and executes one tool call against the workspace. Never throws. */
 export async function executeTool(root: string, name: string, input: unknown): Promise<ToolResult> {
   try {
@@ -193,6 +220,10 @@ export async function executeTool(root: string, name: string, input: unknown): P
       case "grep": {
         const parsed = GrepInput.safeParse(input);
         return parsed.success ? await grepTool(root, parsed.data) : fail(parsed.error.message);
+      }
+      case "read_review_guide": {
+        const parsed = ReviewGuideInput.safeParse(input);
+        return parsed.success ? await reviewGuideTool(parsed.data) : fail(parsed.error.message);
       }
       default:
         return fail(`unknown tool: ${name}`);
