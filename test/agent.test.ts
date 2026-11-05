@@ -25,6 +25,7 @@ const OUTPUT: ReviewOutput = {
   testing: "",
   design: "",
   comments: [],
+  checked_clean: [],
   previous_findings: [],
 };
 

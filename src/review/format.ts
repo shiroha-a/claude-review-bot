@@ -69,7 +69,39 @@ export interface FollowUp {
 }
 
 function label(c: ReviewComment): string {
-  return `**[${c.severity} · ${c.category}]**`;
+  return `**[${c.severity} · ${c.category} · ${c.confidence}]**`;
+}
+
+/** The finding text followed by its failure scenario as a numbered list. */
+function findingText(c: ReviewComment): string {
+  const steps = c.failure_scenario.map((s) => s.trim()).filter((s) => s.length > 0);
+  if (steps.length === 0) return c.body;
+  return `${c.body}\n\n**失敗シナリオ**\n${steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
+}
+
+// 箇条書きの1項目として出すため、2行目以降を字下げしてリストの中に収める
+function listItem(c: ReviewComment): string {
+  const text = `${label(c)} \`${c.path}:${c.line}\` ${findingText(c)}`;
+  return `- ${text.replace(/\n/g, "\n  ")}`;
+}
+
+/**
+ * Unverified findings are reported only when they would be serious if true; below major,
+ * an unverified finding costs the reader more than it is worth.
+ */
+export function isReportable(c: ReviewComment): boolean {
+  return c.confidence !== "possible" || c.severity === "critical" || c.severity === "major";
+}
+
+/**
+ * Keeps the verdict consistent with the findings: a new critical or major finding means the
+ * pull request needs changes. The verdict is only ever raised, never lowered.
+ */
+export function effectiveVerdict(output: ReviewOutput, comments: ReviewComment[]) {
+  const blocking = comments.some(
+    (c) => !c.pre_existing && (c.severity === "critical" || c.severity === "major"),
+  );
+  return output.verdict === "mergeable" && blocking ? "needs_changes" : output.verdict;
 }
 
 function section(title: string, text: string): string | null {
@@ -94,24 +126,38 @@ export function buildReviewPayload(
   meta: ReviewMeta,
   followUp?: FollowUp,
 ): ReviewPayload {
-  const sorted = [...output.comments].sort(
-    (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity],
-  );
+  const reportable = output.comments.filter(isReportable);
+  const dropped = output.comments.length - reportable.length;
+  const sorted = reportable.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   const inline: InlineComment[] = [];
   const outside: ReviewComment[] = [];
+  const preExisting: ReviewComment[] = [];
 
   for (const c of sorted) {
+    // 以前からある問題はPR作者の責任ではないので、行コメントにも持ち越しにも入れない
+    if (c.pre_existing) {
+      preExisting.push(c);
+      continue;
+    }
     const parsed = patches.get(c.path);
     if (parsed && isCommentable(parsed, c.line, c.side)) {
-      inline.push({ path: c.path, line: c.line, side: c.side, body: `${label(c)} ${c.body}` });
+      inline.push({
+        path: c.path,
+        line: c.line,
+        side: c.side,
+        body: `${label(c)} ${findingText(c)}`,
+      });
     } else {
       outside.push(c);
     }
   }
 
+  const verdict = effectiveVerdict(output, sorted);
+  const raised =
+    verdict === output.verdict ? "" : "(major以上の指摘があるため、判定を要修正にしています)";
   const sections: (string | null)[] = [
     REVIEW_HEADING,
-    `**判定: ${VERDICT_LABEL[output.verdict]}** — ${output.verdict_reason.trim()}`,
+    `**判定: ${VERDICT_LABEL[verdict]}** — ${output.verdict_reason.trim()}${raised}`,
   ];
   if (followUp && followUp.statuses.length > 0) {
     sections.push(
@@ -126,8 +172,18 @@ export function buildReviewPayload(
   );
 
   if (outside.length > 0) {
-    const items = outside.map((c) => `- ${label(c)} \`${c.path}:${c.line}\` ${c.body}`);
-    sections.push(`### 差分外の指摘\n\n${items.join("\n")}`);
+    sections.push(`### 差分外の指摘\n\n${outside.map(listItem).join("\n")}`);
+  }
+  if (preExisting.length > 0) {
+    sections.push(
+      `### 既存の問題(このPRで持ち込まれたものではありません)\n\n${preExisting.map(listItem).join("\n")}`,
+    );
+  }
+  const clean = output.checked_clean.map((s) => s.trim()).filter((s) => s.length > 0);
+  if (clean.length > 0) {
+    sections.push(
+      `<details><summary>確認して問題なしと判断した点(${clean.length}件)</summary>\n\n${clean.map((s) => `- ${s}`).join("\n")}\n\n</details>`,
+    );
   }
   if (skipped.length > 0) {
     const items = skipped.map((s) => `- \`${s.filename}\`(${SKIP_REASON[s.reason]})`);
@@ -147,8 +203,9 @@ export function buildReviewPayload(
     })),
   ];
   sections.push(encodeMarker(open));
+  const droppedNote = dropped > 0 ? ` · 未検証のminor/nit ${dropped}件を除外` : "";
   sections.push(
-    `<sub>model: ${meta.model} · ツール呼び出し${meta.stats.toolCalls}回 / ${meta.stats.turns}ターン</sub>`,
+    `<sub>model: ${meta.model} · ツール呼び出し${meta.stats.toolCalls}回 / ${meta.stats.turns}ターン${droppedNote}</sub>`,
   );
 
   return { body: sections.filter((s): s is string => s !== null).join("\n\n"), comments: inline };

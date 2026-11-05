@@ -74,9 +74,13 @@ function setup(opts: {
               side: "RIGHT" as const,
               severity: "major" as const,
               category: "bug" as const,
+              confidence: "confirmed" as const,
               body: "x",
+              failure_scenario: [],
+              pre_existing: false,
             },
           ],
+          checked_clean: [],
           previous_findings: [],
         },
       },
@@ -113,7 +117,9 @@ describe("reviewPullRequest", () => {
       REF,
       "sha1",
       expect.objectContaining({
-        comments: [{ path: "a.ts", line: 1, side: "RIGHT", body: "**[major · bug]** x" }],
+        comments: [
+          { path: "a.ts", line: 1, side: "RIGHT", body: "**[major · bug · confirmed]** x" },
+        ],
       }),
     );
   });
@@ -257,6 +263,7 @@ describe("reviewPullRequest", () => {
         testing: "",
         design: "",
         comments: [],
+        checked_clean: [],
         previous_findings,
       },
     });

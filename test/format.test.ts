@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
-import { ReviewOutputSchema, type ReviewOutput } from "../src/review/claude.js";
+import { ReviewOutputSchema, type ReviewComment, type ReviewOutput } from "../src/review/claude.js";
 import { parsePatch } from "../src/review/diff.js";
 import { parseMarker, type FindingStatus, type PreviousFinding } from "../src/review/followup.js";
-import { buildReviewPayload } from "../src/review/format.js";
+import { buildReviewPayload, effectiveVerdict } from "../src/review/format.js";
 
 const patches = new Map([["src/a.ts", parsePatch("@@ -1,2 +1,2 @@\n a\n-b\n+c")]]);
 const META = { model: "claude-opus-5-5", stats: { turns: 3, toolCalls: 7 } };
@@ -17,6 +17,7 @@ function output(overrides: Partial<ReviewOutput> = {}): ReviewOutput {
     testing: "",
     design: "",
     comments: [],
+    checked_clean: [],
     previous_findings: [],
     ...overrides,
   };
@@ -33,6 +34,9 @@ describe("buildReviewPayload", () => {
             side: "RIGHT",
             severity: "nit",
             category: "style",
+            confidence: "confirmed",
+            failure_scenario: [],
+            pre_existing: false,
             body: "n",
           },
           {
@@ -41,6 +45,9 @@ describe("buildReviewPayload", () => {
             side: "RIGHT",
             severity: "critical",
             category: "bug",
+            confidence: "confirmed",
+            failure_scenario: [],
+            pre_existing: false,
             body: "c",
           },
           {
@@ -49,6 +56,9 @@ describe("buildReviewPayload", () => {
             side: "LEFT",
             severity: "minor",
             category: "test",
+            confidence: "confirmed",
+            failure_scenario: [],
+            pre_existing: false,
             body: "m",
           },
         ],
@@ -58,9 +68,9 @@ describe("buildReviewPayload", () => {
       META,
     );
     expect(payload.comments).toEqual([
-      { path: "src/a.ts", line: 2, side: "RIGHT", body: "**[critical · bug]** c" },
-      { path: "src/a.ts", line: 2, side: "LEFT", body: "**[minor · test]** m" },
-      { path: "src/a.ts", line: 1, side: "RIGHT", body: "**[nit · style]** n" },
+      { path: "src/a.ts", line: 2, side: "RIGHT", body: "**[critical · bug · confirmed]** c" },
+      { path: "src/a.ts", line: 2, side: "LEFT", body: "**[minor · test · confirmed]** m" },
+      { path: "src/a.ts", line: 1, side: "RIGHT", body: "**[nit · style · confirmed]** n" },
     ]);
     expect(payload.body).not.toContain("差分外の指摘");
   });
@@ -107,6 +117,9 @@ describe("buildReviewPayload", () => {
             side: "RIGHT",
             severity: "major",
             category: "bug",
+            confidence: "confirmed",
+            failure_scenario: [],
+            pre_existing: false,
             body: "outside",
           },
           {
@@ -115,6 +128,9 @@ describe("buildReviewPayload", () => {
             side: "RIGHT",
             severity: "minor",
             category: "design",
+            confidence: "confirmed",
+            failure_scenario: [],
+            pre_existing: false,
             body: "unknown",
           },
         ],
@@ -138,6 +154,141 @@ describe("buildReviewPayload", () => {
     );
     expect(payload.body).toContain("`big.ts`(サイズ上限超過)");
     expect(payload.body).toContain("ツール呼び出し7回 / 3ターン");
+  });
+});
+
+function comment(overrides: Partial<ReviewComment> = {}): ReviewComment {
+  return {
+    path: "src/a.ts",
+    line: 2,
+    side: "RIGHT",
+    severity: "major",
+    category: "bug",
+    confidence: "confirmed",
+    body: "本文",
+    failure_scenario: [],
+    pre_existing: false,
+    ...overrides,
+  };
+}
+
+describe("buildReviewPayload deep review rules", () => {
+  it("appends the failure scenario as a numbered list, skipping blank steps", () => {
+    const payload = buildReviewPayload(
+      output({ comments: [comment({ failure_scenario: ["空配列を渡す", " ", "2行目で落ちる"] })] }),
+      patches,
+      [],
+      META,
+    );
+    expect(payload.comments[0]!.body).toBe(
+      "**[major · bug · confirmed]** 本文\n\n**失敗シナリオ**\n1. 空配列を渡す\n2. 2行目で落ちる",
+    );
+  });
+
+  it("indents the scenario of an out-of-diff finding so it stays inside the list item", () => {
+    const { body } = buildReviewPayload(
+      output({ comments: [comment({ line: 99, failure_scenario: ["手順"] })] }),
+      patches,
+      [],
+      META,
+    );
+    expect(body).toContain(
+      "- **[major · bug · confirmed]** `src/a.ts:99` 本文\n  \n  **失敗シナリオ**\n  1. 手順",
+    );
+  });
+
+  it("drops unverified findings below major and notes how many were dropped", () => {
+    const payload = buildReviewPayload(
+      output({
+        comments: [
+          comment({ confidence: "possible", severity: "minor", body: "drop-minor" }),
+          comment({ confidence: "possible", severity: "nit", body: "drop-nit" }),
+          comment({ confidence: "possible", severity: "major", body: "keep-major" }),
+          comment({ confidence: "possible", severity: "critical", body: "keep-critical" }),
+          comment({ confidence: "likely", severity: "minor", body: "keep-likely" }),
+        ],
+      }),
+      patches,
+      [],
+      META,
+    );
+    const bodies = payload.comments.map((c) => c.body).join("\n");
+    expect(bodies).not.toContain("drop-");
+    expect(payload.comments).toHaveLength(3);
+    expect(payload.body).toContain("未検証のminor/nit 2件を除外");
+  });
+
+  it("does not mention dropped findings when nothing was dropped", () => {
+    const { body } = buildReviewPayload(output({ comments: [comment()] }), patches, [], META);
+    expect(body).not.toContain("除外");
+  });
+
+  it("raises a mergeable verdict when a new major or critical finding exists", () => {
+    for (const severity of ["major", "critical"] as const) {
+      const { body } = buildReviewPayload(
+        output({
+          verdict: "mergeable",
+          verdict_reason: "問題なし",
+          comments: [comment({ severity })],
+        }),
+        patches,
+        [],
+        META,
+      );
+      expect(body).toContain(
+        "**判定: 要修正** — 問題なし(major以上の指摘があるため、判定を要修正にしています)",
+      );
+    }
+  });
+
+  it("keeps the verdict when the serious findings are pre-existing, minor, or dropped", () => {
+    const cases = [
+      comment({ pre_existing: true }),
+      comment({ severity: "minor" }),
+      comment({ severity: "minor", confidence: "possible" }),
+    ];
+    for (const c of cases) {
+      const { body } = buildReviewPayload(
+        output({ verdict: "mergeable", comments: [c] }),
+        patches,
+        [],
+        META,
+      );
+      expect(body).toContain("**判定: マージ可**");
+    }
+  });
+
+  it("never lowers the verdict", () => {
+    expect(effectiveVerdict(output({ verdict: "needs_discussion" }), [])).toBe("needs_discussion");
+    expect(effectiveVerdict(output({ verdict: "needs_changes" }), [])).toBe("needs_changes");
+  });
+
+  it("lists pre-existing findings in their own section, not inline and not in the marker", () => {
+    const payload = buildReviewPayload(
+      output({ comments: [comment({ pre_existing: true, body: "昔から" })] }),
+      patches,
+      [],
+      META,
+    );
+    expect(payload.comments).toEqual([]);
+    expect(payload.body).toContain(
+      "### 既存の問題(このPRで持ち込まれたものではありません)\n\n- **[major · bug · confirmed]** `src/a.ts:2` 昔から",
+    );
+    expect(payload.body).not.toContain("差分外の指摘");
+    expect(parseMarker(payload.body)).toEqual([]);
+  });
+
+  it("shows what was checked and found clean in a collapsed section", () => {
+    const { body } = buildReviewPayload(
+      output({ checked_clean: ["認可: 全ハンドラで確認", "  "] }),
+      patches,
+      [],
+      META,
+    );
+    expect(body).toContain(
+      "<details><summary>確認して問題なしと判断した点(1件)</summary>\n\n- 認可: 全ハンドラで確認\n\n</details>",
+    );
+    expect(buildReviewPayload(output(), patches, [], META).body).not.toContain("問題なしと判断");
   });
 });
 
@@ -189,6 +340,9 @@ describe("buildReviewPayload follow-up", () => {
             side: "RIGHT",
             severity: "minor",
             category: "design",
+            confidence: "confirmed",
+            failure_scenario: [],
+            pre_existing: false,
             body: "外",
           },
         ],
@@ -207,7 +361,13 @@ describe("buildReviewPayload follow-up", () => {
         commentId: 13,
         url: "https://example.test/c/11",
       },
-      { path: "src/a.ts", line: 99, body: "**[minor · design]** 外", commentId: null, url: null },
+      {
+        path: "src/a.ts",
+        line: 99,
+        body: "**[minor · design · confirmed]** 外",
+        commentId: null,
+        url: null,
+      },
     ]);
   });
 
@@ -230,8 +390,19 @@ describe("ReviewOutputSchema", () => {
     testing: "",
     design: "",
     comments: [
-      { path: "a", line: 1, side: "RIGHT", severity: "nit", category: "style", body: "b" },
+      {
+        path: "a",
+        line: 1,
+        side: "RIGHT",
+        severity: "nit",
+        category: "style",
+        confidence: "likely",
+        body: "b",
+        failure_scenario: ["step"],
+        pre_existing: false,
+      },
     ],
+    checked_clean: ["c"],
     previous_findings: [{ id: "F1", status: "resolved", note: "n" }],
   };
 
@@ -247,6 +418,11 @@ describe("ReviewOutputSchema", () => {
     expect(() =>
       format.parse(
         JSON.stringify({ ...valid, comments: [{ ...valid.comments[0], category: "other" }] }),
+      ),
+    ).toThrow();
+    expect(() =>
+      format.parse(
+        JSON.stringify({ ...valid, comments: [{ ...valid.comments[0], confidence: "maybe" }] }),
       ),
     ).toThrow();
     expect(() =>

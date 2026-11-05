@@ -17,9 +17,13 @@ export const ReviewOutputSchema = z.object({
       side: z.enum(["RIGHT", "LEFT"]),
       severity: z.enum(["critical", "major", "minor", "nit"]),
       category: z.enum(["bug", "security", "performance", "test", "design", "style"]),
+      confidence: z.enum(["confirmed", "likely", "possible"]),
       body: z.string(),
+      failure_scenario: z.array(z.string()),
+      pre_existing: z.boolean(),
     }),
   ),
+  checked_clean: z.array(z.string()),
   previous_findings: z.array(
     z.object({
       id: z.string(),
