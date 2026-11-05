@@ -5,7 +5,8 @@ Claude APIでPull Requestをレビューし、行単位のコメントとして�
 - PRに`/review`とコメントするとレビューします(自動レビューは既定でOFF)
 - PRのコードをcloneし、Claudeが呼び出し元・関連テスト・既存の実装を調べてからレビューします
 - 本文には判定(マージ可 / 要修正 / 要議論)、変更の概要、主な指摘、テスト、設計・保守性を書きます
-- 指摘は重要度(critical / major / minor / nit)と種類(bug / security / performance / test / design / style)付きのインラインコメントです
+- 指摘は重要度(critical / major / minor / nit)・種類(bug / security / performance / test / design / style)・確度(confirmed / likely / possible)付きのインラインコメントで、番号付きの失敗シナリオを添えます
+- レビューの手順は[deep-code-review](#レビューの手順)に沿います。確認して問題なしと判断した点も本文に残します
 - 再レビューでは前回の指摘ごとに対応状況(修正済み / 一部のみ修正 / 未修正)を確かめ、修正済みのスレッドはresolveします
 - レビューは常に`COMMENT`。ApproveやRequest changesはしません
 - lockfileや生成物は除外。サイズ上限で対象外になったファイルは本文に一覧を出します
@@ -40,12 +41,33 @@ GitHub ──webhook──> server.ts ──> reviewer.ts
                                      │ 2. PRのhead commitを一時ディレクトリへshallow clone
                                      │ 3. 行番号付きdiffをClaudeへ渡し、ツールループを実行
                                      │      read_file / list_files / grep(読み取り専用)
+                                     │      read_review_guide(guides/のチェックリスト)
                                      │      MAX_AGENT_TURNSに達したらツールなしで最終回答
-                                     │ 4. 構造化出力のレビューを受け取り、diff外の行への指摘は本文へ移す
+                                     │ 4. 構造化出力のレビューを受け取り、未検証のminor/nitを除外し、
+                                     │    diff外の行への指摘と既存の問題は本文へ移す
                                      │ 5. pulls.createReview(event: COMMENT)
                                      │    前回の指摘のスレッドへ返信し、修正済みのものをresolve
                                      └ 6. cloneを削除(失敗時も)
 ```
+
+## レビューの手順
+
+Claude Code用の`deep-code-review`スキルの手順を、読み取り専用ツール前提に移植しています
+(プロンプトは`src/review/prompt.ts`、チェックリストは`guides/`)。
+
+1. 意図: 変更が何をするはずか、間違っていたら誰がどう困るかを書く(「変更の概要」)
+2. 地図: 変更された関数の全体・全呼び出し元・エントリポイント・信頼境界・シンクを調べる
+3. 6つのレンズで見直す: 意図と論理 / セキュリティ / 並行性 / エラーとリソース / 境界とAPI契約 / テストと観測性
+4. 反証: 失敗シナリオを書き、ガード・到達可能性を確かめ、確度(confidence)を付ける。落とした候補も見直す
+
+機械的な規則はコード側で強制します。
+
+- 確度が`possible`の指摘は、critical / majorのときだけ投稿します。それ以外は捨て、件数を本文末尾に出します
+- PRで持ち込まれたcritical / majorの指摘があるのに判定が「マージ可」なら、「要修正」に上げます(下げることはしません)
+- 以前からある問題(`pre_existing`)は「既存の問題」節に分け、判定と再レビューの持ち越しからは外します
+
+スキルとの違い: botはコードを実行しないため、テスト・静的解析の実行、再現による確認、
+別エージェントによる独立検証は行いません。
 
 ## セットアップ
 
