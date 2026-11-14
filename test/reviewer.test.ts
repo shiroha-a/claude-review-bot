@@ -6,6 +6,7 @@ import type {
   ReviewOutput,
 } from "../src/review/claude.js";
 import type { PullFile } from "../src/review/filter.js";
+import type { ProjectGuidelines } from "../src/review/guidelines.js";
 import { encodeMarker, parseMarker, type PreviousComment } from "../src/review/followup.js";
 import { reviewPullRequest, type ReviewerDeps } from "../src/review/reviewer.js";
 import type { ToolResult } from "../src/review/tools.js";
@@ -27,6 +28,7 @@ function setup(opts: {
   reviewComments?: PreviousComment[];
   changed?: PullFile[] | null;
   result?: ClaudeReviewResult;
+  guidelines?: ProjectGuidelines;
 }) {
   const reviews =
     opts.reviews ??
@@ -36,6 +38,7 @@ function setup(opts: {
       title: "t",
       body: "b",
       headSha: "sha1",
+      baseSha: "base1",
       draft: false,
       state: "open",
       ...opts.pull,
@@ -86,9 +89,14 @@ function setup(opts: {
       },
   );
   const warn = vi.fn();
+  const loadGuidelines = vi.fn(
+    async (): Promise<ProjectGuidelines> =>
+      opts.guidelines ?? { commit: "base1", files: [], omitted: [], changedInPull: [] },
+  );
   const deps: ReviewerDeps = {
     gateway,
     openWorkspace,
+    loadGuidelines,
     runAgent: requestReview,
     botLogin: BOT,
     warn,
@@ -102,7 +110,7 @@ function setup(opts: {
       excludeGlobs: [],
     },
   };
-  return { deps, gateway, requestReview, openWorkspace, dispose, warn };
+  return { deps, gateway, requestReview, openWorkspace, loadGuidelines, dispose, warn };
 }
 
 describe("reviewPullRequest", () => {
@@ -201,8 +209,47 @@ describe("reviewPullRequest", () => {
   it("opens the workspace at the head commit and disposes it after the review", async () => {
     const { deps, openWorkspace, dispose } = setup({});
     await reviewPullRequest(deps, REF, AUTO);
-    expect(openWorkspace).toHaveBeenCalledWith(REF, "sha1");
+    expect(openWorkspace).toHaveBeenCalledWith(REF, "sha1", "base1");
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  describe("project guidelines", () => {
+    it("loads guidelines from the base commit for every changed file, including skipped ones", async () => {
+      const { deps, loadGuidelines } = setup({
+        files: [
+          { filename: "src/a.ts", status: "modified", patch: "@@ -1 +1 @@\n-a\n+b" },
+          { filename: "package-lock.json", status: "modified", patch: "@@ -1 +1 @@\n-a\n+b" },
+        ],
+      });
+      await reviewPullRequest(deps, REF, AUTO);
+      expect(loadGuidelines).toHaveBeenCalledWith(WORKSPACE_ROOT, "base1", [
+        "src/a.ts",
+        "package-lock.json",
+      ]);
+    });
+
+    it("passes the loaded guidelines to the agent", async () => {
+      const { deps, requestReview } = setup({
+        guidelines: {
+          commit: "base1",
+          files: [{ path: "CLAUDE.md", content: "Use Result types.", truncated: false }],
+          omitted: [],
+          changedInPull: [],
+        },
+      });
+      await reviewPullRequest(deps, REF, AUTO);
+      const { user } = requestReview.mock.calls[0]![0];
+      expect(user).toContain('<guideline path="CLAUDE.md">\nUse Result types.\n</guideline>');
+    });
+
+    it("warns and still reviews when the guidelines cannot be loaded", async () => {
+      const { deps, gateway, loadGuidelines, requestReview, warn } = setup({});
+      loadGuidelines.mockRejectedValueOnce(new Error("git failed"));
+      await expect(reviewPullRequest(deps, REF, AUTO)).resolves.toBe("posted");
+      expect(warn).toHaveBeenCalledWith("failed to load project guidelines", expect.any(Error));
+      expect(requestReview.mock.calls[0]![0].user).not.toContain("<project_guidelines");
+      expect(gateway.createReview).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("disposes the workspace even when the agent fails", async () => {

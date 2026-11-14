@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import { createGateway, type PullRef } from "./github/pr.js";
 import { KeyedQueue } from "./queue.js";
 import { createSender, runReviewAgent } from "./review/claude.js";
+import { loadGuidelines } from "./review/guidelines.js";
 import { openWorkspace } from "./review/workspace.js";
 import { reviewPullRequest, type ReviewOptions } from "./review/reviewer.js";
 import { decideCommandTrigger } from "./trigger.js";
@@ -45,7 +46,7 @@ function schedule(
       const outcome = await reviewPullRequest(
         {
           gateway: createGateway(octokit),
-          openWorkspace: async ({ owner, repo }, sha) => {
+          openWorkspace: async ({ owner, repo }, sha, baseSha) => {
             // AppはスレッドのresolveのためにContents: writeを持つ。cloneにはそのリポジトリの読み取りだけを渡す
             const auth = (await octokit.auth({
               type: "installation",
@@ -55,9 +56,12 @@ function schedule(
             return openWorkspace({
               remoteUrl: `https://github.com/${owner}/${repo}.git`,
               sha,
+              baseSha,
               token: auth.token,
             });
           },
+          loadGuidelines: (root, baseSha, changed) =>
+            loadGuidelines(root, baseSha, changed, config.MAX_GUIDELINE_CHARS),
           runAgent: (options, executeTool) =>
             runReviewAgent(
               {

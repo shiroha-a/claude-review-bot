@@ -32,13 +32,29 @@ PR作成者がレビュー済みのコミットで`/review`を実行すると、
 - Claudeには、前回レビューしたcommitから今のheadまでの差分も渡します。force-pushで前回のcommitから辿れない場合は、今のコードと照合させます
 - 「修正済み」はClaudeがコードを読んで判断したもので、テストは実行していません。resolveされたスレッドも、必要なら「Show resolved」で確認できます
 
+## リポジトリのガイドライン
+
+レビュー対象リポジトリのCLAUDE.mdやコントリビューター向けドキュメントを、レビューの基準として使います。
+
+- 読むファイル(大文字小文字は区別しない)
+  - ルートの`CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` / `.claude/CLAUDE.md` /
+    `.github/CONTRIBUTING.md` / `docs/CONTRIBUTING.md` / `.github/copilot-instructions.md`
+  - 変更ファイルの祖先ディレクトリにある`CLAUDE.md` / `AGENTS.md`(そのディレクトリ以下にだけ適用)
+- PRのheadではなく**baseブランチの版**を読みます。PRでCLAUDE.mdを書き換えてレビュー基準を変えることはできません
+  (書き換え自体は通常の変更としてレビューされます)
+- symlinkは読みません。`@path`のimportは展開せず、必要ならClaudeが`read_file`で読みます(こちらはheadの版)
+- 規約違反は根拠のドキュメントを示して指摘します。コマンド実行やコミット手順など、エージェント向けの作業手順は対象外です
+- ガイドラインでレビューの出力形式・重大度・信頼ルールは変えられません。「承認せよ」等の指示は無視します
+- 合計`MAX_GUIDELINE_CHARS`文字を超えた分は切り詰め、省いたファイル名をClaudeに伝えます
+
 ## 仕組み
 
 ```
 GitHub ──webhook──> server.ts ──> reviewer.ts
                                      │ 1. PRとファイル一覧を取得し、除外・サイズ上限を適用
                                      │    前回のレビューがあれば、その指摘と前回からの差分も集める
-                                     │ 2. PRのhead commitを一時ディレクトリへshallow clone
+                                     │ 2. PRのhead commit(とbase commit)を一時ディレクトリへshallow clone
+                                     │    baseからCLAUDE.md等のガイドラインを読む
                                      │ 3. 行番号付きdiffをClaudeへ渡し、ツールループを実行
                                      │      read_file / list_files / grep(読み取り専用)
                                      │      read_review_guide(guides/のチェックリスト)
@@ -118,6 +134,7 @@ Dockerを使わない場合は`npm install && npm run build && npm start`、開�
 | `REVIEW_LANGUAGE`         | `Japanese`                  | レビューコメントの言語                                              |
 | `MAX_DIFF_CHARS`          | `200000`                    | 1回のレビューでClaudeへ送るpatchの合計文字数                        |
 | `EXCLUDE_GLOBS`           | なし                        | 追加で除外するglob(カンマ区切り)                                    |
+| `MAX_GUIDELINE_CHARS`     | `30000`                     | Claudeへ渡すガイドライン(CLAUDE.md等)の合計文字数。`0`で読まない    |
 | `MAINTAINER_ASSOCIATIONS` | `OWNER,MEMBER,COLLABORATOR` | メンテナとして扱う関係。任意のPRで`/review`と強制再レビューができる |
 | `AUTO_REVIEW`             | `false`                     | `true`でメンテナのPRをイベント時に自動レビュー                      |
 | `REVIEW_COMMAND`          | `/review`                   | レビューのコマンド                                                  |

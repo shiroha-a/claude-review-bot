@@ -23,6 +23,8 @@ const ConfigSchema = z.object({
   REVIEW_LANGUAGE: z.string().default("Japanese"),
   MAX_DIFF_CHARS: z.coerce.number().int().positive().default(200_000),
   EXCLUDE_GLOBS: z.string().default("").transform(csv),
+  // 0でリポジトリのガイドライン(CLAUDE.md等)を読まない
+  MAX_GUIDELINE_CHARS: z.coerce.number().int().nonnegative().default(30_000),
   MAINTAINER_ASSOCIATIONS: z.string().default("OWNER,MEMBER,COLLABORATOR").transform(csv),
   // z.coerce.booleanは"false"もtrueにするため、文字列で受けて判定する
   AUTO_REVIEW: z
