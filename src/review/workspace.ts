@@ -18,6 +18,8 @@ export interface OpenWorkspaceOptions {
   remoteUrl: string;
   /** Commit to check out. */
   sha: string;
+  /** Another commit to fetch without checking it out, such as the pull request base. */
+  baseSha?: string;
   /** Installation token. Omit for public or local remotes. */
   token?: string;
   timeoutMs?: number;
@@ -54,8 +56,11 @@ export async function openWorkspace(options: OpenWorkspaceOptions): Promise<Work
   try {
     await git(["init", "-q"]);
     await git(["config", "core.symlinks", "false"]);
-    await git(["fetch", "-q", "--depth", "1", "--no-tags", options.remoteUrl, options.sha]);
-    await git(["checkout", "-q", "--detach", "FETCH_HEAD"]);
+    const shas = [options.sha];
+    if (options.baseSha && options.baseSha !== options.sha) shas.push(options.baseSha);
+    await git(["fetch", "-q", "--depth", "1", "--no-tags", options.remoteUrl, ...shas]);
+    // 複数fetchするとFETCH_HEADが複数行になるため、SHAを直接指定する
+    await git(["checkout", "-q", "--detach", options.sha]);
   } catch (error) {
     await dispose();
     throw error;
