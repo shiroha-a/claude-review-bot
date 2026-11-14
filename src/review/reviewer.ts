@@ -12,13 +12,16 @@ import {
   type FindingStatus,
 } from "./followup.js";
 import { buildReviewPayload, REVIEW_HEADING } from "./format.js";
+import type { ProjectGuidelines } from "./guidelines.js";
 import { buildSystemPrompt, buildUserPrompt, type PreviousContext } from "./prompt.js";
 import { executeTool as executeToolIn } from "./tools.js";
 
 export interface ReviewerDeps {
   gateway: PullRequestGateway;
-  /** Checks out the pull request head so the model can explore it. */
-  openWorkspace: (ref: PullRef, sha: string) => Promise<Workspace>;
+  /** Checks out the pull request head so the model can explore it, and fetches the base. */
+  openWorkspace: (ref: PullRef, headSha: string, baseSha: string) => Promise<Workspace>;
+  /** Reads the repository's guideline documents that apply to `changed` from `baseSha`. */
+  loadGuidelines: (root: string, baseSha: string, changed: string[]) => Promise<ProjectGuidelines>;
   /** Runs the review agent; `executeTool` is bound to the opened workspace. */
   runAgent: (
     options: ClaudeReviewOptions,
@@ -109,29 +112,41 @@ export async function reviewPullRequest(
   const patches = new Map<string, ParsedPatch>(
     included.map((f) => [f.filename, parsePatch(f.patch)]),
   );
-  const agentOptions: ClaudeReviewOptions = {
-    model: config.model,
-    effort: config.effort,
-    maxTokens: config.maxTokens,
-    maxTurns: config.maxTurns,
-    system: buildSystemPrompt(config.language),
-    user: buildUserPrompt({
-      repo: `${ref.owner}/${ref.repo}`,
-      title: pull.title,
-      body: pull.body,
-      files: included.map((f) => ({
-        filename: f.filename,
-        status: f.status,
-        parsed: patches.get(f.filename)!,
-      })),
-      skippedFiles: skipped.filter((s) => s.reason !== "removed").map((s) => s.filename),
-      previous,
-    }),
-  };
 
-  const workspace = await deps.openWorkspace(ref, pull.headSha);
+  const workspace = await deps.openWorkspace(ref, pull.headSha, pull.baseSha);
   let result: ClaudeReviewResult;
   try {
+    let guidelines: ProjectGuidelines | undefined;
+    try {
+      guidelines = await deps.loadGuidelines(
+        workspace.root,
+        pull.baseSha,
+        files.map((f) => f.filename),
+      );
+    } catch (error) {
+      // ガイドラインは補助情報なので、読めなくてもレビュー自体は続ける
+      deps.warn("failed to load project guidelines", error);
+    }
+    const agentOptions: ClaudeReviewOptions = {
+      model: config.model,
+      effort: config.effort,
+      maxTokens: config.maxTokens,
+      maxTurns: config.maxTurns,
+      system: buildSystemPrompt(config.language),
+      user: buildUserPrompt({
+        repo: `${ref.owner}/${ref.repo}`,
+        title: pull.title,
+        body: pull.body,
+        files: included.map((f) => ({
+          filename: f.filename,
+          status: f.status,
+          parsed: patches.get(f.filename)!,
+        })),
+        skippedFiles: skipped.filter((s) => s.reason !== "removed").map((s) => s.filename),
+        previous,
+        guidelines,
+      }),
+    };
     result = await deps.runAgent(agentOptions, (name, input) =>
       executeToolIn(workspace.root, name, input),
     );

@@ -27,4 +27,12 @@ describe("loadConfig", () => {
   it("listens on 8787 by default", () => {
     expect(loadConfig({ ...REQUIRED }).PORT).toBe(8787);
   });
+
+  it("reads up to 30000 guideline characters by default and accepts 0 to disable", () => {
+    expect(loadConfig({ ...REQUIRED }).MAX_GUIDELINE_CHARS).toBe(30_000);
+    expect(loadConfig({ ...REQUIRED, MAX_GUIDELINE_CHARS: "0" }).MAX_GUIDELINE_CHARS).toBe(0);
+    expect(() => loadConfig({ ...REQUIRED, MAX_GUIDELINE_CHARS: "-1" })).toThrow(
+      "MAX_GUIDELINE_CHARS",
+    );
+  });
 });
