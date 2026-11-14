@@ -2,6 +2,7 @@ import type { PullRequestGateway, PullRef } from "../github/pr.js";
 import type { ClaudeReviewOptions, ClaudeReviewResult } from "./claude.js";
 import type { ToolResult } from "./tools.js";
 import type { Workspace } from "./workspace.js";
+import { findHiddenCharacters, isAgentFile } from "./agentfiles.js";
 import { parsePatch, type ParsedPatch } from "./diff.js";
 import { filterFiles } from "./filter.js";
 import {
@@ -112,6 +113,19 @@ export async function reviewPullRequest(
   const patches = new Map<string, ParsedPatch>(
     included.map((f) => [f.filename, parsePatch(f.patch)]),
   );
+  const promptFiles = included.map((f) => ({
+    filename: f.filename,
+    status: f.status,
+    parsed: patches.get(f.filename)!,
+  }));
+  const skipReasons = new Map(skipped.map((s) => [s.filename, s.reason]));
+  const agentFiles = files
+    .filter((f) => isAgentFile(f.filename))
+    .map((f) => ({
+      filename: f.filename,
+      status: f.status,
+      skippedReason: skipReasons.get(f.filename) ?? null,
+    }));
 
   const workspace = await deps.openWorkspace(ref, pull.headSha, pull.baseSha);
   let result: ClaudeReviewResult;
@@ -137,14 +151,12 @@ export async function reviewPullRequest(
         repo: `${ref.owner}/${ref.repo}`,
         title: pull.title,
         body: pull.body,
-        files: included.map((f) => ({
-          filename: f.filename,
-          status: f.status,
-          parsed: patches.get(f.filename)!,
-        })),
+        files: promptFiles,
         skippedFiles: skipped.filter((s) => s.reason !== "removed").map((s) => s.filename),
         previous,
         guidelines,
+        agentFiles,
+        hiddenCharacters: findHiddenCharacters(promptFiles),
       }),
     };
     result = await deps.runAgent(agentOptions, (name, input) =>

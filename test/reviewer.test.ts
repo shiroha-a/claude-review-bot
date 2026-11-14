@@ -213,6 +213,23 @@ describe("reviewPullRequest", () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
+  it("tells the agent about changed agent files and hidden characters", async () => {
+    const zwsp = String.fromCodePoint(0x200b);
+    const { deps, requestReview } = setup({
+      files: [
+        { filename: "CLAUDE.md", status: "modified", patch: `@@ -1 +1 @@\n-a\n+b${zwsp}` },
+        { filename: ".claude/settings.json", status: "added" },
+        { filename: "src/a.ts", status: "modified", patch: "@@ -1 +1 @@\n-a\n+b" },
+      ],
+    });
+    await reviewPullRequest(deps, REF, AUTO);
+    const { user } = requestReview.mock.calls[0]![0];
+    expect(user).toContain(
+      "<agent_files>\nCLAUDE.md (modified)\n.claude/settings.json (added; not in the diff: no-patch; read it with read_file)\n</agent_files>",
+    );
+    expect(user).toContain("<hidden_characters>\nCLAUDE.md:1 U+200B\n</hidden_characters>");
+  });
+
   describe("project guidelines", () => {
     it("loads guidelines from the base commit for every changed file, including skipped ones", async () => {
       const { deps, loadGuidelines } = setup({
