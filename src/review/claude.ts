@@ -41,9 +41,45 @@ export interface ReviewStats {
   toolCalls: number;
 }
 
+/** One switch to a fallback model after a refusal, as reported by a `fallback` content block. */
+export interface FallbackSwitch {
+  /** 1-based index of the request in this review. */
+  request: number;
+  from: string;
+  to: string;
+  /** Refusal category of the `from` model, such as "cyber"; null when uncategorized. */
+  category: string | null;
+}
+
+export interface FallbackSummary {
+  switches: FallbackSwitch[];
+  /** Requests answered by a fallback model, including sticky turns that carry no block. */
+  servedRequests: number;
+  /** Requests sent in this review. */
+  requests: number;
+}
+
 export type ClaudeReviewResult =
-  | { kind: "ok"; output: ReviewOutput; model: string; stats: ReviewStats }
-  | { kind: "refused"; category: string | null };
+  | {
+      kind: "ok";
+      output: ReviewOutput;
+      model: string;
+      stats: ReviewStats;
+      fallback: FallbackSummary;
+    }
+  | { kind: "refused"; category: string | null; fallback: FallbackSummary };
+
+/** Describes fallback activity as log lines; empty when no fallback model ran. */
+export function describeFallback(f: FallbackSummary): string[] {
+  const lines = f.switches.map(
+    (s) =>
+      `request ${s.request}/${f.requests}: ${s.from} -> ${s.to} (category: ${s.category ?? "none"})`,
+  );
+  if (f.servedRequests > 0) {
+    lines.push(`served by a fallback model on ${f.servedRequests}/${f.requests} requests`);
+  }
+  return lines;
+}
 
 export interface ClaudeReviewOptions {
   model: string;
@@ -89,6 +125,7 @@ export async function runReviewAgent(
   let turns = 0;
   let toolCalls = 0;
   let parseRetries = 0;
+  const fallback: FallbackSummary = { switches: [], servedRequests: 0, requests: 0 };
 
   while (true) {
     const budgetSpent = turns >= options.maxTurns;
@@ -116,8 +153,23 @@ export async function runReviewAgent(
       continue;
     }
 
+    fallback.requests++;
+    for (const block of message.content) {
+      if (block.type !== "fallback") continue;
+      fallback.switches.push({
+        request: fallback.requests,
+        from: block.from.model,
+        to: block.to.model,
+        category: block.trigger?.category ?? null,
+      });
+    }
+    // 一度切り替わると以降のリクエストはfallbackブロック無しで直接fallbackモデルが応答するため、iterationsで数える
+    if (message.usage.iterations?.some((i) => i.type === "fallback_message")) {
+      fallback.servedRequests++;
+    }
+
     if (message.stop_reason === "refusal") {
-      return { kind: "refused", category: message.stop_details?.category ?? null };
+      return { kind: "refused", category: message.stop_details?.category ?? null, fallback };
     }
     if (message.stop_reason === "max_tokens") {
       throw new Error(
@@ -143,6 +195,7 @@ export async function runReviewAgent(
         output: message.parsed_output,
         model: message.model,
         stats: { turns, toolCalls },
+        fallback,
       };
     }
 

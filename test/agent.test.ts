@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import {
   BUDGET_NOTICE,
+  describeFallback,
   runReviewAgent,
   type AgentDeps,
   type ClaudeReviewOptions,
@@ -86,6 +87,7 @@ describe("runReviewAgent", () => {
       output: OUTPUT,
       model: "claude-opus-5-5",
       stats: { turns: 0, toolCalls: 0 },
+      fallback: { switches: [], servedRequests: 0, requests: 1 },
     });
     expect(sent[0]).toMatchObject({
       model: "claude-opus-5-5",
@@ -171,8 +173,91 @@ describe("runReviewAgent", () => {
         content: [{ type: "tool_use", id: "t", name: "grep", input: {} }] as Msg["content"],
       }),
     ]);
-    expect(await runReviewAgent(deps, OPTIONS)).toEqual({ kind: "refused", category: "cyber" });
+    expect(await runReviewAgent(deps, OPTIONS)).toEqual({
+      kind: "refused",
+      category: "cyber",
+      fallback: { switches: [], servedRequests: 0, requests: 1 },
+    });
     expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  describe("fallback", () => {
+    const usage = (...types: string[]) =>
+      ({ iterations: types.map((type) => ({ type })) }) as unknown as Msg["usage"];
+    const switchBlock = (category: string | null) => ({
+      type: "fallback",
+      from: { model: "claude-opus-5-5" },
+      to: { model: "claude-opus-4-8" },
+      trigger: { type: "refusal", category },
+    });
+
+    it("records each switch with its request and category, and counts sticky turns", async () => {
+      const turn = toolTurn({ id: "t1", name: "list_files", input: {} });
+      const { deps } = setup([
+        {
+          ...turn,
+          content: [switchBlock("cyber"), ...turn.content] as Msg["content"],
+          usage: usage("message", "fallback_message"),
+        },
+        { ...final(), model: "claude-opus-4-8", usage: usage("fallback_message") },
+      ]);
+      const result = await runReviewAgent(deps, OPTIONS);
+      expect(result.fallback).toEqual({
+        switches: [
+          { request: 1, from: "claude-opus-5-5", to: "claude-opus-4-8", category: "cyber" },
+        ],
+        servedRequests: 2,
+        requests: 2,
+      });
+    });
+
+    it("records the switch when the fallback model also refuses", async () => {
+      const { deps } = setup([
+        message({
+          stop_reason: "refusal",
+          stop_details: {
+            type: "refusal",
+            category: "cyber",
+            explanation: null,
+          } as Msg["stop_details"],
+          content: [switchBlock(null)] as Msg["content"],
+          usage: usage("message", "message"),
+        }),
+      ]);
+      const result = await runReviewAgent(deps, OPTIONS);
+      expect(result.fallback.switches).toEqual([
+        { request: 1, from: "claude-opus-5-5", to: "claude-opus-4-8", category: null },
+      ]);
+      expect(result.fallback.servedRequests).toBe(0);
+    });
+
+    it("does not count requests retried after a malformed tool input", async () => {
+      const { deps } = setup([new Error("bad json"), final()]);
+      expect((await runReviewAgent(deps, OPTIONS)).fallback.requests).toBe(1);
+    });
+  });
+
+  describe("describeFallback", () => {
+    it("is empty when no fallback model ran", () => {
+      expect(describeFallback({ switches: [], servedRequests: 0, requests: 3 })).toEqual([]);
+    });
+
+    it("describes each switch and how many requests the fallback model served", () => {
+      expect(
+        describeFallback({
+          switches: [
+            { request: 1, from: "claude-opus-5-5", to: "claude-opus-4-8", category: "cyber" },
+            { request: 3, from: "claude-opus-4-8", to: "claude-opus-5", category: null },
+          ],
+          servedRequests: 2,
+          requests: 4,
+        }),
+      ).toEqual([
+        "request 1/4: claude-opus-5-5 -> claude-opus-4-8 (category: cyber)",
+        "request 3/4: claude-opus-4-8 -> claude-opus-5 (category: none)",
+        "served by a fallback model on 2/4 requests",
+      ]);
+    });
   });
 
   it("throws on max_tokens instead of running a truncated tool call", async () => {
