@@ -13,6 +13,8 @@ export interface PullInfo {
   title: string;
   body: string;
   headSha: string;
+  /** Tip of the base branch. */
+  baseSha: string;
   draft: boolean;
   state: string;
 }
@@ -81,6 +83,7 @@ export function createGateway(octokit: Octokit): PullRequestGateway {
         title: data.title,
         body: data.body ?? "",
         headSha: data.head.sha,
+        baseSha: data.base.sha,
         draft: data.draft ?? false,
         state: data.state,
       };

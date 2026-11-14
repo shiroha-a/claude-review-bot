@@ -68,6 +68,19 @@ describe("openWorkspace", () => {
     expect(existsSync(tmp.root)).toBe(false);
   });
 
+  it("fetches the base commit without checking it out", async () => {
+    git(source, "commit", "-q", "--allow-empty", "-m", "head");
+    const head = git(source, "rev-parse", "HEAD");
+    const tmp = await openWorkspace({ remoteUrl: source, sha: head, baseSha: sha });
+    try {
+      expect(git(tmp.root, "rev-parse", "HEAD")).toBe(head);
+      expect(git(tmp.root, "cat-file", "-t", sha)).toBe("commit");
+    } finally {
+      await tmp.dispose();
+      git(source, "reset", "-q", "--hard", sha);
+    }
+  });
+
   it("cleans up and rejects when the commit does not exist", async () => {
     const checkouts = () =>
       new Set(readdirSync(tmpdir()).filter((n) => n.startsWith("claude-review-")));
