@@ -57,4 +57,36 @@ describe("filterFiles", () => {
     });
     expect(result.included).toHaveLength(1);
   });
+
+  it("never excludes files that AI agents read, even when a glob matches them", () => {
+    const result = filterFiles(
+      [
+        { filename: "docs/a.md", status: "modified", patch: "+x" },
+        { filename: "CLAUDE.md", status: "modified", patch: "+x" },
+        { filename: "vendor/.claude/settings.json", status: "added", patch: "+x" },
+      ],
+      { excludeGlobs: ["**/*.md"], maxChars: 1000 },
+    );
+    expect(result.included.map((f) => f.filename)).toEqual([
+      "CLAUDE.md",
+      "vendor/.claude/settings.json",
+    ]);
+    expect(result.skipped).toEqual([{ filename: "docs/a.md", reason: "excluded" }]);
+  });
+
+  it("gives agent files the size budget first and keeps the input order", () => {
+    const result = filterFiles(
+      [
+        { filename: "src/big.ts", status: "modified", patch: "x".repeat(8) },
+        { filename: "src/small.ts", status: "modified", patch: "x".repeat(2) },
+        { filename: ".claude/settings.json", status: "modified", patch: "x".repeat(8) },
+      ],
+      { excludeGlobs: [], maxChars: 10 },
+    );
+    expect(result.included.map((f) => f.filename)).toEqual([
+      "src/small.ts",
+      ".claude/settings.json",
+    ]);
+    expect(result.skipped).toEqual([{ filename: "src/big.ts", reason: "size-limit" }]);
+  });
 });
