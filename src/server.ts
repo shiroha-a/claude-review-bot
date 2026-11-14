@@ -5,7 +5,7 @@ import { App } from "octokit";
 import { loadConfig } from "./config.js";
 import { createGateway, type PullRef } from "./github/pr.js";
 import { KeyedQueue } from "./queue.js";
-import { createSender, runReviewAgent } from "./review/claude.js";
+import { createSender, describeFallback, runReviewAgent } from "./review/claude.js";
 import { loadGuidelines } from "./review/guidelines.js";
 import { openWorkspace } from "./review/workspace.js";
 import { reviewPullRequest, type ReviewOptions } from "./review/reviewer.js";
@@ -62,8 +62,8 @@ function schedule(
           },
           loadGuidelines: (root, baseSha, changed) =>
             loadGuidelines(root, baseSha, changed, config.MAX_GUIDELINE_CHARS),
-          runAgent: (options, executeTool) =>
-            runReviewAgent(
+          runAgent: async (options, executeTool) => {
+            const result = await runReviewAgent(
               {
                 send: sender,
                 executeTool: async (name, input) => {
@@ -75,7 +75,16 @@ function schedule(
                 },
               },
               options,
-            ),
+            );
+            // 切り替えの有無と理由はレビュー本文に残らないため、後から調べられるようにログへ出す
+            for (const line of describeFallback(result.fallback)) {
+              console.log(`[fallback] ${key} ${line}`);
+            }
+            if (result.kind === "refused") {
+              console.log(`[review] ${key} refused (category: ${result.category ?? "none"})`);
+            }
+            return result;
+          },
           botLogin,
           warn: (message, error) =>
             console.warn(

@@ -63,6 +63,7 @@ function setup(opts: {
         kind: "ok" as const,
         model: "m",
         stats: { turns: 1, toolCalls: 2 },
+        fallback: { switches: [], servedRequests: 0, requests: 1 },
         output: {
           overview: "o",
           verdict: "needs_changes",
@@ -190,7 +191,13 @@ describe("reviewPullRequest", () => {
   });
 
   it("posts a notice when the model refuses", async () => {
-    const { deps, gateway } = setup({ result: { kind: "refused", category: "cyber" } });
+    const { deps, gateway } = setup({
+      result: {
+        kind: "refused",
+        category: "cyber",
+        fallback: { switches: [], servedRequests: 0, requests: 1 },
+      },
+    });
     await expect(reviewPullRequest(deps, REF, AUTO)).resolves.toBe("refused");
     expect(gateway.createReview).toHaveBeenCalledWith(
       REF,
@@ -319,6 +326,7 @@ describe("reviewPullRequest", () => {
       kind: "ok",
       model: "m",
       stats: { turns: 1, toolCalls: 1 },
+      fallback: { switches: [], servedRequests: 0, requests: 1 },
       output: {
         overview: "o",
         verdict: "needs_changes",
@@ -428,7 +436,13 @@ describe("reviewPullRequest", () => {
     });
 
     it("carries every previous finding forward when the model refuses", async () => {
-      const { deps, gateway } = followUp({ result: { kind: "refused", category: "cyber" } });
+      const { deps, gateway } = followUp({
+        result: {
+          kind: "refused",
+          category: "cyber",
+          fallback: { switches: [], servedRequests: 0, requests: 1 },
+        },
+      });
       await reviewPullRequest(deps, REF, AUTHOR);
       const body = vi.mocked(gateway.createReview).mock.calls[0]![2].body;
       expect(body.startsWith("## Claude Review")).toBe(true);

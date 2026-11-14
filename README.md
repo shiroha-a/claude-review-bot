@@ -126,7 +126,7 @@ Dockerで常駐させます。
 ```bash
 cp .env.example .env   # 値を埋める
 docker compose up -d --build
-docker compose logs -f # [tool] / [review] の行で動作を確認できる
+docker compose logs -f # [tool] / [review] / [fallback] の行で動作を確認できる
 ```
 
 - ポートはホストの`127.0.0.1:8787`にだけ公開します。外部からはトンネル(cloudflared等)経由で`/api/github/webhooks`へ届けてください
@@ -162,6 +162,9 @@ Dockerを使わない場合は`npm install && npm run build && npm start`、開�
 - PRの内容とリポジトリのファイルはプロンプトインジェクションの入力になり得ます。モデルに渡すツールは読み取り専用で、clone先の外(`..`・絶対パス・symlink・`.git`)は読めません。リポジトリのコードは実行しません。最終的にできるのは`COMMENT`レビューの投稿と、ボット自身の指摘スレッドへの返信・resolveだけです。インジェクションで「修正済み」と誤判定させられた場合も、スレッドは消えず「Show resolved」から見られます
 - cloneの認証トークンは環境変数経由でgitに渡し、コマンドライン引数や`.git/config`には残しません
 - 安全分類器による拒否は、サーバー側フォールバック(`fallbacks: "default"`)で別モデルが引き継ぎます。それでも拒否された場合は、その旨をレビュー本文に書きます
+  - 切り替えはログに`[fallback]`の行で残ります(何回目のリクエストで、どのモデルからどのモデルへ、拒否の分類)。
+    例: `[fallback] owner/repo#4 request 1/4: claude-opus-5-5 -> claude-opus-4-8 (category: cyber)`
+  - 一度切り替わると、以降のリクエストはfallbackモデルが直接応答します(`served by a fallback model on N/M requests`)
 
 ## 開発
 
